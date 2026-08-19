@@ -1,0 +1,55 @@
+{
+  "name": "railyard-mcp",
+  "version": "0.1.0",
+  "description": "Model Context Protocol server for Railyard \u2014 read and write access to Railyard datacenter projects and organisations over stdio, authenticated with a personal access token.",
+  "license": "MIT",
+  "author": {
+    "name": "Kristian Carbonaro",
+    "url": "https://railyard.sh"
+  },
+  "type": "module",
+  "bin": {
+    "railyard-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "manifest.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "homepage": "https://github.com/railyard-sh/railyard-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/railyard-sh/railyard-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/railyard-sh/railyard-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "railyard",
+    "datacenter",
+    "dcim",
+    "stdio"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

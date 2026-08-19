@@ -1,0 +1,193 @@
+{
+  "manifest_version": "0.3",
+  "name": "railyard-mcp",
+  "display_name": "Railyard",
+  "version": "0.1.0",
+  "description": "Read and write access to your Railyard datacenter projects and organisations, authenticated with a personal access token.",
+  "long_description": "A Model Context Protocol server that gives an MCP client (Claude Desktop, Claude Code, Cursor, or any other) read and write access to your Railyard projects and organisations. It talks to a running Railyard backend over its REST API and authenticates with a personal access token (PAT) minted in Railyard under User settings \u2192 Personal access tokens. Tools cover projects (list, read, create, update, rename, move, delete), design validation and export, organisations, members and invitations, and billing state.",
+  "author": {
+    "name": "Kristian Carbonaro",
+    "url": "https://railyard.sh"
+  },
+  "homepage": "https://railyard.sh",
+  "documentation": "https://github.com/railyard-sh/railyard-mcp#readme",
+  "support": "https://github.com/railyard-sh/railyard-mcp/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/railyard-sh/railyard-mcp.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "railyard",
+    "datacenter",
+    "dcim"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/dist/index.js"
+      ],
+      "env": {
+        "RAILYARD_TOKEN": "${user_config.token}",
+        "RAILYARD_BASE_URL": "${user_config.base_url}",
+        "RAILYARD_ORG": "${user_config.org}"
+      }
+    }
+  },
+  "tools_generated": false,
+  "tools": [
+    {
+      "name": "whoami",
+      "description": "Return the user the personal access token authenticates as (id, email, name)."
+    },
+    {
+      "name": "server_info",
+      "description": "Report the Railyard server's version, schema version and which features are configured."
+    },
+    {
+      "name": "list_orgs",
+      "description": "List the organisations the token's user belongs to, with role, plan and billing status."
+    },
+    {
+      "name": "list_projects",
+      "description": "List projects in an organisation (id, name, slug, last-updated time)."
+    },
+    {
+      "name": "get_project",
+      "description": "Fetch a project's full JSON document by id or URL slug."
+    },
+    {
+      "name": "check_project_name",
+      "description": "Check whether a project name is free in an org and see the slug it would get."
+    },
+    {
+      "name": "list_export_formats",
+      "description": "List the export targets this build supports (nautobot-csv, netbox-csv, designbuilder-yaml, json)."
+    },
+    {
+      "name": "validate_project",
+      "description": "Run Railyard's design validation over a saved or inline project and return the problems it finds."
+    },
+    {
+      "name": "export_project",
+      "description": "Export a project into a downstream format and return the generated files, unresolved placements and warnings."
+    },
+    {
+      "name": "create_project",
+      "description": "Create a new, empty project and save it to the organisation."
+    },
+    {
+      "name": "update_project",
+      "description": "Save changes to a project via a full-document PUT. Destructive; merges partial fields by default."
+    },
+    {
+      "name": "rename_project",
+      "description": "Rename a project, updating its display name and URL slug together."
+    },
+    {
+      "name": "delete_project",
+      "description": "Permanently delete a project and its estate. Destructive; no undo."
+    },
+    {
+      "name": "move_project",
+      "description": "Move a project into another organisation you can write to, optionally renaming it."
+    },
+    {
+      "name": "create_org",
+      "description": "Create a new shared organisation; the token's user becomes its owner."
+    },
+    {
+      "name": "rename_org",
+      "description": "Change an organisation's display name (owner-only)."
+    },
+    {
+      "name": "delete_org",
+      "description": "Permanently delete a shared org and every project in it. Destructive; owner-only."
+    },
+    {
+      "name": "get_org_catalog",
+      "description": "Read an organisation's shared device-type library."
+    },
+    {
+      "name": "set_org_catalog",
+      "description": "Replace an organisation's shared device-type library wholesale. Destructive."
+    },
+    {
+      "name": "list_members",
+      "description": "List an organisation's members \u2014 user id, email, role and joined-at."
+    },
+    {
+      "name": "set_member_role",
+      "description": "Change an existing member's role (owner-only)."
+    },
+    {
+      "name": "remove_member",
+      "description": "Remove a member from an organisation. Destructive; owner-only."
+    },
+    {
+      "name": "list_invites",
+      "description": "List an organisation's pending invitations (owner-only)."
+    },
+    {
+      "name": "invite_member",
+      "description": "Invite an email to join an organisation at a role (Team/Enterprise plan required)."
+    },
+    {
+      "name": "revoke_invite",
+      "description": "Withdraw a pending invitation (owner-only)."
+    },
+    {
+      "name": "list_my_invites",
+      "description": "List invitations addressed to the token user's own email."
+    },
+    {
+      "name": "accept_invite",
+      "description": "Accept an invitation addressed to the token user's email, joining that organisation."
+    },
+    {
+      "name": "get_billing",
+      "description": "Read an organisation's plan, status, seats and edit-entitlement."
+    },
+    {
+      "name": "billing_manage_url",
+      "description": "Mint a Stripe Checkout or Customer Portal URL for the owner to open in a browser."
+    }
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  },
+  "user_config": {
+    "token": {
+      "type": "string",
+      "title": "Personal access token",
+      "description": "Your Railyard ry_\u2026 personal access token. Mint one in Railyard under User settings \u2192 Personal access tokens; it is shown only once.",
+      "sensitive": true,
+      "required": true
+    },
+    "base_url": {
+      "type": "string",
+      "title": "Railyard base URL",
+      "description": "Base URL of your Railyard backend. Use https://railyard.sh for the hosted service, or your self-hosted URL such as http://localhost:8080.",
+      "default": "https://railyard.sh",
+      "required": false
+    },
+    "org": {
+      "type": "string",
+      "title": "Default organisation (optional)",
+      "description": "Org id, slug or name to target by default when a tool call does not name one. Leave blank to use your first (personal) organisation.",
+      "required": false
+    }
+  }
+}
