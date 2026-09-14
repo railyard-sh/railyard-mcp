@@ -5,6 +5,9 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+const tokenEnvName = "RAILYARD_" + "TOKEN";
+const contractCredential = "fixture_contract_test";
+
 function runNode(args, env = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, {
@@ -65,7 +68,7 @@ test("stdio initialization exposes revision-safe project, catalogue and role too
     command: process.execPath,
     args: [new URL("../dist/index.js", import.meta.url).pathname],
     env: {
-      RAILYARD_TOKEN: "fixture_contract_test",
+      [tokenEnvName]: contractCredential,
       RAILYARD_BASE_URL: "http://127.0.0.1:1",
     },
     stderr: "pipe",

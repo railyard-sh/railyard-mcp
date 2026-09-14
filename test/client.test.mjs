@@ -190,6 +190,7 @@ test("caller-supplied revision values must match Railyard's quoted numeric ETag 
 
 test("read-only and stateless endpoints keep credentials in headers and encode request data", async () => {
   const requests = [];
+  const headerCredential = "fixture_header_only";
   await withServer(async (request, response) => {
     requests.push({ method: request.method, url: request.url, authorization: request.headers.authorization });
     if (request.url === "/api/me") return json(response, 200, { id: "usr_test", email: "user@example.test", name: "User" });
@@ -209,7 +210,7 @@ test("read-only and stateless endpoints keep credentials in headers and encode r
     }
     return json(response, 404, { error: "unexpected route" });
   }, async (baseUrl) => {
-    const client = newClient(baseUrl, "fixture_header_only");
+    const client = newClient(baseUrl, headerCredential);
     const project = { schemaVersion: "1", id: "prj_test", name: "Project" };
 
     await client.me();
@@ -223,8 +224,8 @@ test("read-only and stateless endpoints keep credentials in headers and encode r
 
   assert(requests.length > 0);
   for (const request of requests) {
-    assert.equal(request.authorization, "Bearer fixture_header_only");
-    assert(!request.url.includes("fixture_header_only"));
+    assert.equal(request.authorization, `Bearer ${headerCredential}`);
+    assert(!request.url.includes(headerCredential));
   }
 });
 
@@ -244,11 +245,12 @@ test("HTTP failures remain status-aware without exposing credentials", async () 
     [500, /Railyard API error/],
   ];
   let requestIndex = 0;
+  const hiddenCredential = "fixture_never_render";
   await withServer((_request, response) => {
     const [status] = cases[requestIndex++];
     json(response, status, { error: "public detail" });
   }, async (baseUrl) => {
-    const client = newClient(baseUrl, "fixture_never_render");
+    const client = newClient(baseUrl, hiddenCredential);
     for (const [status, message] of cases) {
       await assert.rejects(
         client.health(),
@@ -256,7 +258,7 @@ test("HTTP failures remain status-aware without exposing credentials", async () 
           error instanceof RailyardApiError &&
           error.status === status &&
           message.test(error.message) &&
-          !error.message.includes("fixture_never_render"),
+          !error.message.includes(hiddenCredential),
       );
     }
   });
