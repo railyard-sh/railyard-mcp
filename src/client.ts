@@ -56,6 +56,12 @@ export interface Project {
   organisation?: string;
   createdAt?: string;
   updatedAt?: string;
+  example?: {
+    template: "data-centre";
+    version: number;
+  };
+  containers?: unknown[];
+  containerTypes?: string[];
   locations?: unknown[];
   dataCentres?: unknown[];
   rows?: unknown[];
@@ -68,8 +74,16 @@ export interface Project {
   meetMeRooms?: unknown[];
   cables?: unknown[];
   powerLinks?: unknown[];
+  reviewDismissals?: string[];
+  deviceRoles?: string[];
   meta?: Record<string, unknown>;
   [key: string]: unknown;
+}
+
+/** A replacement resource together with the strong revision token required to update it. */
+export interface Revisioned<T> {
+  value: T;
+  etag: string;
 }
 
 /** Response of PUT /api/projects/{id}. */
@@ -223,8 +237,12 @@ function describeError(status: number, text: string): string {
       // Conflicts differ by endpoint — a name already taken, a duplicate subscription, the last
       // owner, an email that is already a member — so the server's own message carries the detail.
       return `Conflict (409)${suffix}`;
+    case 412:
+      return `Revision conflict (412)${suffix}. Reload the resource and reapply your changes; no changes were saved.`;
     case 413:
       return `Payload too large (413)${suffix}.`;
+    case 428:
+      return `Revision required (428)${suffix}. Reload the resource to get its ETag before saving; no changes were saved.`;
     case 429:
       return `Rate limited (429)${suffix}.`;
     case 501:
@@ -248,6 +266,22 @@ export interface RailyardClientOptions {
 interface RequestOptions {
   body?: unknown;
   orgId?: string;
+  ifMatch?: string;
+}
+
+interface RequestResult<T> {
+  value: T;
+  response: Response;
+}
+
+const revisionETagPattern = /^"\d+"$/;
+
+function checkedRevisionETag(value: string): string {
+  const revision = value.trim();
+  if (!revisionETagPattern.test(revision)) {
+    throw new RailyardApiError(400, 'Revision must be a quoted numeric ETag such as "7".');
+  }
+  return revision;
 }
 
 export class RailyardClient {
@@ -269,6 +303,7 @@ export class RailyardClient {
       Accept: "application/json",
     };
     if (opts.orgId) headers["X-Org-Id"] = opts.orgId;
+    if (opts.ifMatch) headers["If-Match"] = checkedRevisionETag(opts.ifMatch);
     let payload: string | undefined;
     if (opts.body !== undefined) {
       headers["Content-Type"] = "application/json";
@@ -277,7 +312,7 @@ export class RailyardClient {
     return fetch(`${this.baseUrl}${path}`, { method, headers, body: payload });
   }
 
-  private async request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
+  private async requestResult<T>(method: string, path: string, opts: RequestOptions = {}): Promise<RequestResult<T>> {
     let res: Response;
     try {
       res = await this.send(method, path, opts);
@@ -288,12 +323,31 @@ export class RailyardClient {
     if (!res.ok) {
       throw new RailyardApiError(res.status, describeError(res.status, text), text);
     }
-    if (!text) return undefined as T; // 204 No Content (e.g. delete)
+    if (!text) return { value: undefined as T, response: res }; // 204 No Content (e.g. delete)
     try {
-      return JSON.parse(text) as T;
+      return { value: JSON.parse(text) as T, response: res };
     } catch {
-      return text as unknown as T;
+      return { value: text as unknown as T, response: res };
     }
+  }
+
+  private async request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
+    return (await this.requestResult<T>(method, path, opts)).value;
+  }
+
+  private async requestRevisioned<T>(method: string, path: string, opts: RequestOptions = {}): Promise<Revisioned<T>> {
+    const result = await this.requestResult<T>(method, path, opts);
+    const etag = result.response.headers.get("ETag")?.trim() ?? "";
+    if (!revisionETagPattern.test(etag)) {
+      const message = method === "GET"
+        ? `Railyard returned ${method} ${path} without a valid revision ETag; refusing an unsafe replacement write.`
+        : `Railyard accepted ${method} ${path} but omitted the new revision ETag. The write may have succeeded; reload the resource before making another change.`;
+      throw new RailyardApiError(
+        502,
+        message,
+      );
+    }
+    return { value: result.value, etag };
   }
 
   // ---- org resolution -------------------------------------------------------
@@ -360,6 +414,12 @@ export class RailyardClient {
     return this.request<Project>("GET", `/api/projects/${encodeURIComponent(ref)}`, { orgId });
   }
 
+  /** GET a project together with the ETag required for a safe replacement. */
+  async getProjectWithRevision(ref: string, orgRef?: string): Promise<Revisioned<Project>> {
+    const orgId = await this.resolveOrgId(orgRef);
+    return this.requestRevisioned<Project>("GET", `/api/projects/${encodeURIComponent(ref)}`, { orgId });
+  }
+
   /** GET /api/projects/check — is a name's slug free in the org? */
   async checkName(name: string, orgRef?: string, exclude?: string): Promise<NameCheck> {
     const orgId = await this.resolveOrgId(orgRef);
@@ -375,6 +435,48 @@ export class RailyardClient {
       orgId,
       body: project,
     });
+  }
+
+  /** PUT an existing project only if the revision read by the caller is still current. */
+  async saveProjectAtRevision(project: Project, etag: string, orgRef?: string): Promise<Revisioned<SaveResult>> {
+    const revision = checkedRevisionETag(etag);
+    const orgId = await this.resolveOrgId(orgRef);
+    return this.requestRevisioned<SaveResult>("PUT", `/api/projects/${encodeURIComponent(project.id)}`, {
+      orgId,
+      body: project,
+      ifMatch: revision,
+    });
+  }
+
+  /**
+   * Read, immutably merge or replace, then conditionally save an existing project.
+   * expectedRevision lets a caller protect work derived from an earlier get_project response.
+   */
+  async updateProject(
+    ref: string,
+    fields: Record<string, unknown>,
+    merge = true,
+    orgRef?: string,
+    expectedRevision?: string,
+  ): Promise<Revisioned<SaveResult>> {
+    const expected = expectedRevision ? checkedRevisionETag(expectedRevision) : undefined;
+    const current = await this.getProjectWithRevision(ref, orgRef);
+    if (expected && expected !== current.etag) {
+      throw new RailyardApiError(
+        412,
+        `Revision conflict (412): the project changed after revision ${expected}. Reload it and reapply your changes; no changes were saved.`,
+      );
+    }
+    const candidate = merge ? { ...current.value, ...fields } : { ...fields };
+    const project = {
+      ...candidate,
+      id: current.value.id,
+      schemaVersion:
+        typeof candidate.schemaVersion === "string" && candidate.schemaVersion
+          ? candidate.schemaVersion
+          : current.value.schemaVersion,
+    } as Project;
+    return this.saveProjectAtRevision(project, current.etag, orgRef);
   }
 
   /** POST /api/projects/{id}/rename — change the name + URL slug. */
@@ -460,16 +562,36 @@ export class RailyardClient {
     await this.request<void>("DELETE", `/api/orgs/${encodeURIComponent(orgId)}`);
   }
 
-  /** GET /api/orgs/{id}/catalog — the org's shared device-type library (any member). */
-  async orgCatalog(orgRef?: string): Promise<unknown[]> {
+  /** GET /api/orgs/{id}/catalog and the ETag required to replace it (any member). */
+  async getOrgCatalogWithRevision(orgRef?: string): Promise<Revisioned<unknown[]>> {
     const orgId = await this.requireOrgId(orgRef);
-    return this.request<unknown[]>("GET", `/api/orgs/${encodeURIComponent(orgId)}/catalog`);
+    return this.requestRevisioned<unknown[]>("GET", `/api/orgs/${encodeURIComponent(orgId)}/catalog`);
   }
 
   /** PUT /api/orgs/{id}/catalog — replace the shared device-type library (editor+). */
-  async setOrgCatalog(catalogue: unknown[], orgRef?: string): Promise<void> {
+  async setOrgCatalog(catalogue: unknown[], etag: string, orgRef?: string): Promise<Revisioned<void>> {
+    const revision = checkedRevisionETag(etag);
     const orgId = await this.requireOrgId(orgRef);
-    await this.request<void>("PUT", `/api/orgs/${encodeURIComponent(orgId)}/catalog`, { body: catalogue });
+    return this.requestRevisioned<void>("PUT", `/api/orgs/${encodeURIComponent(orgId)}/catalog`, {
+      body: catalogue,
+      ifMatch: revision,
+    });
+  }
+
+  /** GET /api/orgs/{id}/roles — shared device-role vocabulary plus its revision. */
+  async getOrgRolesWithRevision(orgRef?: string): Promise<Revisioned<string[]>> {
+    const orgId = await this.requireOrgId(orgRef);
+    return this.requestRevisioned<string[]>("GET", `/api/orgs/${encodeURIComponent(orgId)}/roles`);
+  }
+
+  /** PUT /api/orgs/{id}/roles — conditionally replace the shared device-role vocabulary. */
+  async setOrgRoles(roles: string[], etag: string, orgRef?: string): Promise<Revisioned<void>> {
+    const revision = checkedRevisionETag(etag);
+    const orgId = await this.requireOrgId(orgRef);
+    return this.requestRevisioned<void>("PUT", `/api/orgs/${encodeURIComponent(orgId)}/roles`, {
+      body: [...roles],
+      ifMatch: revision,
+    });
   }
 
   // ---- members & invitations ------------------------------------------------

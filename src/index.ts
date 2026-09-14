@@ -16,20 +16,42 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { helpText, resolveBaseUrl, runAuthHelper } from "./auth.js";
 import { RailyardApiError, RailyardClient, type ExportFile, type Project } from "./client.js";
+import { minimalProject } from "./project.js";
 
 // ---- configuration (from the environment) -----------------------------------
 
-const DEFAULT_BASE_URL = "http://localhost:8080";
-
-const baseUrl = process.env.RAILYARD_BASE_URL?.trim() || DEFAULT_BASE_URL;
+let baseUrl: string;
+try {
+  baseUrl = resolveBaseUrl(process.env.RAILYARD_BASE_URL);
+} catch (error) {
+  console.error(`railyard-mcp: ${(error as Error).message}.`);
+  process.exit(1);
+}
 const token = process.env.RAILYARD_TOKEN?.trim() || "";
 const defaultOrg = process.env.RAILYARD_ORG?.trim() || undefined;
+
+const [mode, ...modeArgs] = process.argv.slice(2);
+if (mode === "auth" || mode === "login") {
+  try {
+    await runAuthHelper(modeArgs, { baseUrl, defaultOrg });
+  } catch (error) {
+    console.error(`railyard-mcp: ${(error as Error).message}.`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+if (mode === "--help" || mode === "-h" || mode === "help") {
+  console.log(helpText());
+  process.exit(0);
+}
 
 if (!token) {
   console.error(
     "railyard-mcp: RAILYARD_TOKEN is not set. Mint a personal access token in Railyard " +
-      "(User settings → Personal access tokens) and set RAILYARD_TOKEN to the ry_… secret.",
+      "(User settings → Personal access tokens) and set RAILYARD_TOKEN to the ry_… secret. " +
+      "Run `npx -y railyard-mcp auth` to open Railyard in your browser.",
   );
   process.exit(1);
 }
@@ -37,10 +59,6 @@ if (!token.startsWith("ry_")) {
   // Not fatal — but the server only accepts ry_-prefixed tokens, so warn early.
   console.error('railyard-mcp: warning — RAILYARD_TOKEN does not start with "ry_"; Railyard will reject it.');
 }
-if (!process.env.RAILYARD_BASE_URL) {
-  console.error(`railyard-mcp: RAILYARD_BASE_URL not set; defaulting to ${DEFAULT_BASE_URL}.`);
-}
-
 const client = new RailyardClient({ baseUrl, token, defaultOrg });
 
 // ---- tool result helpers ----------------------------------------------------
@@ -84,28 +102,10 @@ const roleArg = z
   .enum(["viewer", "editor", "owner"])
   .describe("viewer = read-only, editor = can create and change projects, owner = full control including members and billing.");
 
-/** Build a minimal, server-valid project document with a fresh client-minted id. */
-function minimalProject(name: string): Project {
-  const rand = Math.random().toString(36).slice(2, 8);
-  const id = `prj_${Date.now().toString(36)}${rand}`;
-  return {
-    schemaVersion: "1",
-    id,
-    name,
-    createdAt: new Date().toISOString(),
-    locations: [],
-    dataCentres: [],
-    rows: [],
-    racks: [],
-    podPatterns: [],
-    namingRules: [],
-    catalogue: [],
-    rackTypes: [],
-    meetMeRooms: [],
-    cables: [],
-    powerLinks: [],
-  };
-}
+const revisionArg = z
+  .string()
+  .regex(/^"\d+"$/)
+  .describe('The quoted numeric ETag returned by the matching read tool, for example "7".');
 
 /**
  * Resolve the document a validate/export call should operate on: either a stored project named
@@ -149,7 +149,7 @@ function renderExportFile(f: ExportFile): { name: string; mime: string; bytes: n
 // ---- server -----------------------------------------------------------------
 
 const server = new McpServer(
-  { name: "railyard-mcp", version: "0.1.0" },
+  { name: "railyard-mcp", version: "0.2.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -200,16 +200,21 @@ server.registerTool(
   {
     title: "Get project",
     description:
-      "Fetch a project's full JSON document, addressed by its id or its URL slug. " +
-      "The document is the complete estate model (locations, dataCentres, rows, racks with " +
-      "placements, catalogue, cables, …) — the same shape update_project expects.",
+      "Fetch a project's full JSON document and revision ETag, addressed by id or URL slug. " +
+      "The project contains the complete estate model, including the flexible container hierarchy, " +
+      "racks and placements, device roles, review dismissals, cabling and power. Pass `revision` to " +
+      "update_project when applying work derived from this response so concurrent changes are not overwritten.",
     inputSchema: {
       ref: z.string().min(1).describe("The project's id (prj_…) or its URL slug."),
       org: orgArg,
     },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
-  ({ ref, org }) => guard(async () => ok(await client.getProject(ref, org))),
+  ({ ref, org }) =>
+    guard(async () => {
+      const current = await client.getProjectWithRevision(ref, org);
+      return ok({ project: current.value, revision: current.etag });
+    }),
 );
 
 server.registerTool(
@@ -265,11 +270,11 @@ server.registerTool(
   {
     title: "Validate project",
     description:
-      "Run Railyard's design validation over a project and return the problems it finds: placements " +
-      "outside their rack's U range, placements overlapping on a shared face, and racks with no " +
-      "resolvable data centre. Each problem carries a severity (error = will export broken, " +
-      "warning = a design smell that still exports), a code, a message, and the rack/placement it " +
-      "concerns. Nothing is changed or rejected — this is the same check the app shows.",
+      "Run the current Railyard server-side soft validation over a project: rack placement/site " +
+      "findings and power-model problems. Structurally invalid documents, including malformed " +
+      "hierarchy or cabling references, are rejected before this report. Each raw problem carries a " +
+      "severity, stable code, message and relevant rack or placement ids. Nothing is saved; the " +
+      "interactive app may group or dismiss eligible review findings separately.",
     inputSchema: {
       ref: z.string().optional().describe("A saved project's id (prj_…) or slug to validate."),
       project: z
@@ -375,8 +380,8 @@ server.registerTool(
       "shallow-merged over the current document (only the top-level keys you supply are replaced, " +
       "e.g. pass just {racks:[…]} to swap the racks) — recommended. With merge=false, `project` is " +
       "taken as the entire new document and must be a complete, valid project. The project's real id " +
-      "is always preserved. If the project is currently open in a live collaboration session in the " +
-      "app, that session may overwrite this save (and vice versa) — prefer editing when no one has it open.",
+      "is always preserved. Concurrent browser or MCP saves are guarded by revision checks: a stale " +
+      "update is refused instead of overwriting newer work.",
     inputSchema: {
       id: z.string().min(1).describe("The project's id (prj_…) or slug identifying which project to update."),
       project: z
@@ -390,28 +395,21 @@ server.registerTool(
         .optional()
         .default(true)
         .describe("true (default): shallow-merge over the current doc. false: replace the whole document."),
+      revision: revisionArg
+        .optional()
+        .describe(
+          "Revision returned by get_project. When present, the update is refused if the project changed " +
+            "since that read. When omitted, update_project safely reads the latest revision immediately before saving.",
+        ),
       org: orgArg,
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   },
-  ({ id, project, merge, org }) =>
+  ({ id, project, merge, revision, org }) =>
     guard(async () => {
       const doMerge = merge ?? true;
-      // The PUT path must be the project's REAL id (it is not slug-resolved server-side, unlike GET).
-      // Fetch the current doc when merging, or when the caller may have passed a slug, to pin the id.
-      let realId = id;
-      let current: Project | undefined;
-      if (doMerge || !id.startsWith("prj_")) {
-        current = await client.getProject(id, org);
-        realId = current.id;
-      }
-      const doc: Project = doMerge
-        ? ({ ...(current as Project), ...(project as Record<string, unknown>) } as Project)
-        : ({ ...(project as Record<string, unknown>) } as Project);
-      doc.id = realId; // never let a body id create a new row under a slug
-      if (!doc.schemaVersion) doc.schemaVersion = current?.schemaVersion ?? "1";
-      const saved = await client.saveProject(doc, org);
-      return ok({ updated: saved, merged: doMerge });
+      const saved = await client.updateProject(id, project, doMerge, org, revision);
+      return ok({ updated: saved.value, revision: saved.etag, merged: doMerge });
     }),
 );
 
@@ -527,11 +525,16 @@ server.registerTool(
     title: "Get shared device-type library",
     description:
       "Read an organisation's shared device-type library — the catalogue of device types available " +
-      "to every project in the org, separate from each project's own `catalogue`. Any member may read it.",
+      "to every project in the org, separate from each project's own `catalogue`. Returns the complete " +
+      "`catalogue` plus its `revision`; pass that revision to set_org_catalog. Any member may read it.",
     inputSchema: { org: orgArg },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
-  ({ org }) => guard(async () => ok(await client.orgCatalog(org))),
+  ({ org }) =>
+    guard(async () => {
+      const current = await client.getOrgCatalogWithRevision(org);
+      return ok({ catalogue: current.value, revision: current.etag });
+    }),
 );
 
 server.registerTool(
@@ -541,18 +544,58 @@ server.registerTool(
     description:
       "Replace an organisation's shared device-type library with the given array. DESTRUCTIVE: this " +
       "is a whole-library write, not a merge — types absent from `catalogue` are removed. Read the " +
-      "current library with get_org_catalog and send it back with your additions to preserve it. " +
-      "Requires an editor/owner role.",
+      "current library with get_org_catalog and send it back with your additions plus its `revision`. " +
+      "The write fails rather than overwriting a concurrent change. Requires an editor/owner role.",
     inputSchema: {
       catalogue: z.array(z.unknown()).describe("The complete new library: a JSON array of device types, in the shape get_org_catalog returns."),
+      revision: revisionArg,
       org: orgArg,
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   },
-  ({ catalogue, org }) =>
+  ({ catalogue, revision, org }) =>
     guard(async () => {
-      await client.setOrgCatalog(catalogue, org);
-      return ok({ saved: catalogue.length });
+      const saved = await client.setOrgCatalog(catalogue, revision, org);
+      return ok({ saved: catalogue.length, revision: saved.etag });
+    }),
+);
+
+server.registerTool(
+  "get_org_roles",
+  {
+    title: "Get shared device roles",
+    description:
+      "Read an organisation's shared device-role vocabulary. Returns the complete `roles` array and " +
+      "its `revision`; pass that revision to set_org_roles. Project-level deviceRoles are layered on top.",
+    inputSchema: { org: orgArg },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  },
+  ({ org }) =>
+    guard(async () => {
+      const current = await client.getOrgRolesWithRevision(org);
+      return ok({ roles: current.value, revision: current.etag });
+    }),
+);
+
+server.registerTool(
+  "set_org_roles",
+  {
+    title: "Replace shared device roles (DESTRUCTIVE)",
+    description:
+      "Replace an organisation's shared device-role vocabulary. This is a whole-array write: read it " +
+      "with get_org_roles, preserve the entries you still need, and pass back that response's revision. " +
+      "The write fails rather than overwriting a concurrent change. Requires an editor/owner role.",
+    inputSchema: {
+      roles: z.array(z.string().trim().min(1)).describe("The complete new shared device-role vocabulary."),
+      revision: revisionArg,
+      org: orgArg,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  },
+  ({ roles, revision, org }) =>
+    guard(async () => {
+      const saved = await client.setOrgRoles(roles, revision, org);
+      return ok({ saved: roles.length, revision: saved.etag });
     }),
 );
 

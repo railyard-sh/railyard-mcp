@@ -1,7 +1,7 @@
 # Railyard MCP server
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server that gives an MCP client
-(Claude Desktop, Claude Code, or any other) **read and write** access to your Railyard
+(Codex, Claude Desktop, Claude Code, or any other) **read and write** access to your Railyard
 projects and organisations. It talks to a running Railyard backend over its REST API and
 authenticates with a **personal access token** (PAT).
 
@@ -21,10 +21,10 @@ It speaks MCP over **stdio** and is written in TypeScript against the official
 | Tool | Kind | Description |
 | --- | --- | --- |
 | `list_projects` | read | Projects in an org (id, name, slug, updated-at). |
-| `get_project` | read | A project's full JSON document, by id **or** slug. |
+| `get_project` | read | A project's full JSON document and revision ETag, by id **or** slug. |
 | `check_project_name` | read | Whether a name is free in an org (and the slug it would get). |
 | `create_project` | write | Create a new, empty project and save it. |
-| `update_project` | write · **destructive** | Save a project via full-document PUT. Merges partial fields by default; can replace the whole document. |
+| `update_project` | write · **destructive** | Conditionally save a project via full-document PUT. Merges partial fields by default; can replace the whole document. |
 | `rename_project` | write | Change a project's name + URL slug. |
 | `delete_project` | write · **destructive** | Permanently delete a project. No undo. |
 | `move_project` | write | Move a project into another org you can write to, optionally renaming it in the same step. |
@@ -34,7 +34,7 @@ It speaks MCP over **stdio** and is written in TypeScript against the official
 
 | Tool | Kind | Description |
 | --- | --- | --- |
-| `validate_project` | read | Design problems: out-of-bounds placements, overlaps on a face, racks with no data centre. Same check the app shows. |
+| `validate_project` | read | Current server-side rack-layout/site and power findings for a saved or inline project; structural hierarchy/cabling errors are rejected first. |
 | `list_export_formats` | read | The export targets this build supports (`nautobot-csv`, `netbox-csv`, `designbuilder-yaml`, `json`). |
 | `export_project` | read | Render a project into a format and return the files' content, unresolved placements and warnings. |
 
@@ -48,8 +48,10 @@ It speaks MCP over **stdio** and is written in TypeScript against the official
 | `create_org` | write | Create a shared org; you become its owner. |
 | `rename_org` | write · owner | Change an org's display name. |
 | `delete_org` | write · **destructive** · owner | Delete a shared org **and every project in it**. No undo. |
-| `get_org_catalog` | read | The org's shared device-type library. |
-| `set_org_catalog` | write · **destructive** | Replace that library wholesale (not a merge). |
+| `get_org_catalog` | read | The org's shared device-type library and revision ETag. |
+| `set_org_catalog` | write · **destructive** | Conditionally replace that library wholesale (not a merge). |
+| `get_org_roles` | read | The org's shared device-role vocabulary and revision ETag. |
+| `set_org_roles` | write · **destructive** | Conditionally replace the shared role vocabulary wholesale. |
 | `list_members` | read | Roster: user id, email, role, joined-at. |
 | `set_member_role` | write · owner | Change a member's role. |
 | `remove_member` | write · **destructive** · owner | Remove a member and drop their live sessions. |
@@ -62,7 +64,7 @@ It speaks MCP over **stdio** and is written in TypeScript against the official
 | `billing_manage_url` | write · owner | Mint a Stripe Checkout or Customer Portal URL to open in a browser. Creates a link only — it charges nothing. |
 
 The destructive tools (`update_project`, `delete_project`, `delete_org`, `set_org_catalog`,
-`remove_member`) are annotated with the MCP `destructiveHint`, so clients that surface tool
+`set_org_roles`, `remove_member`) are annotated with the MCP `destructiveHint`, so clients that surface tool
 safety hints will flag them.
 
 **Not exposed, deliberately.** Personal-access-token management, account deletion and the
@@ -82,12 +84,24 @@ the org id the API needs (via `GET /api/orgs`) automatically.
 
 ### 1. Requirements
 
-- Node.js 18 or newer.
-- A running Railyard backend **with persistence + auth enabled** (i.e. started with
-  `DATABASE_URL` set). The project/org API only exists in that mode. Note the base URL,
-  e.g. `http://localhost:8080`.
+- Node.js 20 or newer.
+- A Railyard account and personal access token. The server connects to
+  `https://railyard.sh` by default. Set `RAILYARD_BASE_URL` only when using a self-hosted
+  or local backend with persistence and authentication enabled.
 
 ### 2. Mint a personal access token
+
+Quick path:
+
+```bash
+npx -y railyard-mcp auth
+```
+
+That opens Railyard in your browser. Sign in, open User settings if needed, create a token,
+and copy the `ry_…` secret. In headless environments, run `npx -y railyard-mcp auth --no-open`
+and copy the printed URL.
+
+Manual path:
 
 1. Sign in to Railyard in your browser.
 2. Go to **User settings → Personal access tokens**.
@@ -99,10 +113,10 @@ Treat this secret like a password (see [Auth model](#auth-model-why-a-pat) below
 ### 3. Install and build
 
 Only needed to **run from source** (or to develop). If you install the published package
-with `npx -y railyard-mcp`, skip this — npm fetches and builds it for you.
+with `npx -y railyard-mcp`, skip this; npm fetches the packaged `dist/` files for you.
 
 ```bash
-cd mcp
+cd railyard-mcp
 npm install
 npm run build
 ```
@@ -114,13 +128,13 @@ This compiles `src/` to `dist/`. The entry point is `dist/index.js`.
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `RAILYARD_TOKEN` | **yes** | Your `ry_…` personal access token. |
-| `RAILYARD_BASE_URL` | no | Railyard base URL. Defaults to `http://localhost:8080`. |
+| `RAILYARD_BASE_URL` | no | Railyard base URL. Defaults to `https://railyard.sh`; override it only for self-hosted or local Railyard. |
 | `RAILYARD_ORG` | no | Default org (id or slug) for org-scoped tools. |
 
 You can smoke-test it from a shell:
 
 ```bash
-RAILYARD_TOKEN=ry_xxx RAILYARD_BASE_URL=http://localhost:8080 npm start
+RAILYARD_TOKEN=ry_xxx npm start
 # (it waits on stdio for an MCP client; Ctrl-C to exit)
 ```
 
@@ -140,16 +154,16 @@ see the standalone [INSTALL.md](./INSTALL.md); the essentials are below.
   `node /absolute/path/to/railyard-mcp/dist/index.js` after `npm install && npm run build`
   in this repo (see [Setup](#setup)). Substitute that `command`/`args` in any snippet below.
 
-All snippets set the **hosted** URL `https://railyard.sh`. For a self-hosted or local
-backend, set `RAILYARD_BASE_URL` to your own URL (e.g. `http://localhost:8080`).
-`RAILYARD_ORG` is optional — add it to pin a default organisation.
+The published package uses the **hosted** URL `https://railyard.sh` automatically. For a
+self-hosted or local backend, add `RAILYARD_BASE_URL` with your own URL (for example,
+`http://localhost:8080`). `RAILYARD_ORG` is optional — add it to pin a default organisation.
 
 ### Claude Desktop — one-click bundle (`.mcpb`)
 
 The easiest path, no JSON. Open **Claude Desktop → Settings → Extensions**, then drag in
-(or **Install extension**) the packaged `railyard-mcp.mcpb` bundle and fill in the token +
-base URL fields it prompts for. The bundle is built from [`manifest.json`](./manifest.json)
-— see [For operators](#for-operators-publishing).
+(or **Install extension**) the packaged `railyard-mcp.mcpb` bundle and fill in the token.
+Leave the optional base URL at its hosted default unless you self-host. The bundle is built
+from [`manifest.json`](./manifest.json) — see [For operators](#for-operators-publishing).
 
 ### Claude Desktop — manual config
 
@@ -166,7 +180,6 @@ Add the server under `mcpServers` in `claude_desktop_config.json`:
       "args": ["-y", "railyard-mcp"],
       "env": {
         "RAILYARD_TOKEN": "ry_your_token_here",
-        "RAILYARD_BASE_URL": "https://railyard.sh",
         "RAILYARD_ORG": "my-team-slug"
       }
     }
@@ -186,7 +199,6 @@ Register it in one command:
 ```bash
 claude mcp add railyard \
   --env RAILYARD_TOKEN=ry_your_token_here \
-  --env RAILYARD_BASE_URL=https://railyard.sh \
   -- npx -y railyard-mcp
 ```
 
@@ -195,6 +207,30 @@ instead of your user config (keep real tokens out of committed files). From sour
 the trailing `-- npx -y railyard-mcp` for `-- node /absolute/path/to/railyard-mcp/dist/index.js`.
 
 A project-level `.mcp.json` takes the same shape as the Claude Desktop block above.
+
+### Codex CLI
+
+Need Codex first? Install the Codex CLI:
+
+```bash
+curl -fsSL https://chatgpt.com/codex/install.sh | sh
+```
+
+Register it in one command:
+
+```bash
+codex mcp add railyard \
+  --env RAILYARD_TOKEN=ry_your_token_here \
+  -- npx -y railyard-mcp
+```
+
+Check it with `codex mcp list`. Run `codex mcp --help` to see the rest of the Codex MCP
+commands. From source, swap the trailing `-- npx -y railyard-mcp` for
+`-- node /absolute/path/to/railyard-mcp/dist/index.js`.
+
+`codex mcp login railyard` is only for MCP servers that advertise OAuth. Railyard currently
+uses a PAT, so use `npx -y railyard-mcp auth` to open Railyard in your browser, then paste
+the resulting token into the `RAILYARD_TOKEN` env var above.
 
 ### Cursor
 
@@ -208,8 +244,7 @@ Edit `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project), then enable
       "command": "npx",
       "args": ["-y", "railyard-mcp"],
       "env": {
-        "RAILYARD_TOKEN": "ry_your_token_here",
-        "RAILYARD_BASE_URL": "https://railyard.sh"
+        "RAILYARD_TOKEN": "ry_your_token_here"
       }
     }
   }
@@ -224,7 +259,6 @@ Launch this command with the environment set; the client speaks MCP to it over s
 command: npx
 args:    ["-y", "railyard-mcp"]
 env:     RAILYARD_TOKEN=ry_your_token_here
-         RAILYARD_BASE_URL=https://railyard.sh
          RAILYARD_ORG=my-team-slug        # optional
 ```
 
@@ -289,17 +323,21 @@ all-or-nothing, which is why the guidance above matters.
 
 ## Notes & caveats
 
-- **`update_project` is a whole-document save.** The API's save endpoint is a `PUT` of the
+- **`update_project` is a revision-safe whole-document save.** The API's save endpoint is a `PUT` of the
   entire project JSON. To make partial edits safe, `update_project` defaults to
   `merge=true`: it fetches the current document and shallow-merges the top-level keys you
   supply (so `{racks:[…]}` replaces only the racks). Pass `merge=false` to replace the whole
-  document, in which case you must provide a complete, valid project.
-- **`set_org_catalog` is a whole-library write too.** It replaces the org's shared device-type
-  library; anything absent from the array you send is removed. Read it with `get_org_catalog`
-  first and send that back with your additions.
+  document, in which case you must provide a complete, valid project. `get_project` returns a
+  `revision`; pass it to `update_project` when the edit was derived from that read. The update is
+  refused with 412 if something else saved first. Omitting it still performs a fresh conditional
+  read immediately before saving.
+- **Shared catalogues and roles are revision-safe whole-array writes.** `set_org_catalog` and
+  `set_org_roles` replace their entire arrays. Read the matching resource first, preserve every
+  entry you still need, and pass its returned `revision` to the set tool. A concurrent change is
+  refused instead of being overwritten.
 - **Live collaboration.** If a project is open in a live collaboration session in the app,
-  that session owns saving. A `PUT` from this server and the room's autosave can overwrite
-  each other. Prefer writing when no one has the project open in the browser.
+  coordinate with the people editing it. Revision checks prevent a stale MCP save from silently
+  overwriting a newer room save, but they cannot decide whose intended change should win.
 - **Export output is truncated.** A large artefact is cut off in the tool reply with an
   explicit marker (the byte count is always reported in full). Use the app's download for the
   complete file.
@@ -307,7 +345,9 @@ all-or-nothing, which is why the guidance above matters.
   catalogue entry comes back under `unresolved` rather than vanishing; pass
   `placeholders: true` to emit it as a placeholder device type so the row still imports.
 - **Schema.** Documents use `schemaVersion: "1"` and the backend rejects unknown top-level
-  fields, so stick to the shape returned by `get_project`.
+  fields. The current shape includes `containers`, `containerTypes`, `deviceRoles`,
+  `reviewDismissals`, cabling and power data. Use the `project` object returned by `get_project`
+  rather than the surrounding revision envelope as the update body.
 
 ## For operators (publishing)
 
@@ -320,10 +360,10 @@ these are the manual operator steps.
 npm publish            # runs the build first via prepublishOnly; add --access public if you scope the name
 ```
 
-`package.json` ships only `dist/`, `manifest.json`, `README.md` and `LICENSE` (see its
+`package.json` ships only `dist/`, `manifest.json`, `README.md`, `INSTALL.md` and `LICENSE` (see its
 `files`), and the `prepare`/`prepublishOnly` scripts rebuild `dist/` so it is always fresh
-on publish. Confirm the package **name** (currently the unscoped `railyard-mcp`) is the one
-you want and is available, or pick a scope such as `@your-org/mcp` before publishing.
+on publish. The public package name is the unscoped `railyard-mcp`. Publishing remains an
+explicit operator action; verify the version, changelog and package contents first.
 
 **Claude Desktop bundle** (`.mcpb`, the one-click install):
 
@@ -333,20 +373,26 @@ npx @anthropic-ai/mcpb pack         # bundles manifest.json + dist/ + deps into 
 ```
 
 The bundle is described by [`manifest.json`](./manifest.json): it declares the Node entry
-point and a `user_config` that prompts the user for the token (stored securely) and base
-URL, mapping them to `RAILYARD_TOKEN` / `RAILYARD_BASE_URL` at launch. Distribute the
-resulting `.mcpb` file for drag-and-drop install.
+point and a `user_config` that prompts for the token (stored securely) and an optional base
+URL that defaults to the hosted service. Distribute the resulting `.mcpb` file for
+drag-and-drop install.
 
 ## Development
 
 ```bash
 npm run build      # compile once
 npm run dev        # compile on change (tsc --watch)
+npm test           # build and run API-contract tests
+npm run test:coverage # enforce at least 80% line coverage (Node 22+)
 npm run typecheck  # type-check without emitting
 ```
 
 Source layout:
 
 - `src/client.ts` — the typed HTTP client. All auth (`Authorization: Bearer`), org
-  resolution (`X-Org-Id`), and error mapping live here, in one place.
+  resolution (`X-Org-Id`), revision preconditions (`ETag` / `If-Match`), and error mapping
+  live here, in one place.
+- `src/auth.ts` — hosted/self-hosted URL validation plus the explicit cross-platform browser
+  helper used by `railyard-mcp auth`.
+- `src/project.ts` — the canonical empty project factory used by `create_project`.
 - `src/index.ts` — the MCP server: tool definitions (zod schemas + annotations) and stdio wiring.

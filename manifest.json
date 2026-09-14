@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "railyard-mcp",
   "display_name": "Railyard",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Read and write access to your Railyard datacenter projects and organisations, authenticated with a personal access token.",
-  "long_description": "A Model Context Protocol server that gives an MCP client (Claude Desktop, Claude Code, Cursor, or any other) read and write access to your Railyard projects and organisations. It talks to a running Railyard backend over its REST API and authenticates with a personal access token (PAT) minted in Railyard under User settings \u2192 Personal access tokens. Tools cover projects (list, read, create, update, rename, move, delete), design validation and export, organisations, members and invitations, and billing state.",
+  "long_description": "A Model Context Protocol server that gives Codex, Claude Desktop, Claude Code, Cursor, or another MCP client read and write access to your Railyard projects and organisations. It connects to hosted Railyard by default, supports self-hosted deployments through an optional base URL, and authenticates with a personal access token (PAT) minted in Railyard under User settings \u2192 Personal access tokens. Tools cover revision-safe project updates, design validation and export, shared device catalogues and roles, organisations, members and invitations, and billing state.",
   "author": {
     "name": "Kristian Carbonaro",
     "url": "https://railyard.sh"
@@ -20,6 +20,7 @@
   "keywords": [
     "mcp",
     "model-context-protocol",
+    "codex",
     "railyard",
     "datacenter",
     "dcim"
@@ -59,7 +60,7 @@
     },
     {
       "name": "get_project",
-      "description": "Fetch a project's full JSON document by id or URL slug."
+      "description": "Fetch a project's full JSON document and revision ETag by id or URL slug."
     },
     {
       "name": "check_project_name",
@@ -83,7 +84,7 @@
     },
     {
       "name": "update_project",
-      "description": "Save changes to a project via a full-document PUT. Destructive; merges partial fields by default."
+      "description": "Conditionally save changes via a full-document PUT. Destructive; merges partial fields by default."
     },
     {
       "name": "rename_project",
@@ -111,11 +112,19 @@
     },
     {
       "name": "get_org_catalog",
-      "description": "Read an organisation's shared device-type library."
+      "description": "Read an organisation's shared device-type library and revision ETag."
     },
     {
       "name": "set_org_catalog",
-      "description": "Replace an organisation's shared device-type library wholesale. Destructive."
+      "description": "Conditionally replace an organisation's shared device-type library wholesale. Destructive."
+    },
+    {
+      "name": "get_org_roles",
+      "description": "Read an organisation's shared device-role vocabulary and revision ETag."
+    },
+    {
+      "name": "set_org_roles",
+      "description": "Conditionally replace an organisation's shared device-role vocabulary wholesale. Destructive."
     },
     {
       "name": "list_members",
@@ -165,7 +174,7 @@
       "linux"
     ],
     "runtimes": {
-      "node": ">=18.0.0"
+      "node": ">=20.0.0"
     }
   },
   "user_config": {
