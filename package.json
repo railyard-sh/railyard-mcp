@@ -1,6 +1,6 @@
 {
   "name": "railyard-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Model Context Protocol server for Railyard \u2014 read and write access to Railyard datacenter projects and organisations over stdio, authenticated with a personal access token.",
   "license": "MIT",
   "author": {

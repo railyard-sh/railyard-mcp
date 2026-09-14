@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "railyard-mcp",
   "display_name": "Railyard",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Read and write access to your Railyard datacenter projects and organisations, authenticated with a personal access token.",
   "long_description": "A Model Context Protocol server that gives Codex, Claude Desktop, Claude Code, Cursor, or another MCP client read and write access to your Railyard projects and organisations. It connects to hosted Railyard by default, supports self-hosted deployments through an optional base URL, and authenticates with a personal access token (PAT) minted in Railyard under User settings \u2192 Personal access tokens. Tools cover revision-safe project updates, design validation and export, shared device catalogues and roles, organisations, members and invitations, and billing state.",
   "author": {

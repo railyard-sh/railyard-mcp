@@ -149,7 +149,7 @@ function renderExportFile(f: ExportFile): { name: string; mime: string; bytes: n
 // ---- server -----------------------------------------------------------------
 
 const server = new McpServer(
-  { name: "railyard-mcp", version: "0.2.0" },
+  { name: "railyard-mcp", version: "0.2.1" },
   { capabilities: { tools: {} } },
 );
 
