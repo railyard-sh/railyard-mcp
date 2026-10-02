@@ -83,6 +83,9 @@ test("stdio initialization exposes revision-safe project, catalogue and role too
     for (const name of ["get_project", "update_project", "get_org_catalog", "set_org_catalog", "get_org_roles", "set_org_roles"]) {
       assert(tools.has(name), `missing ${name}`);
     }
+    // Renaming an org is owner-level administration the API keeps to browser sessions (railyard#555),
+    // so a token-driven server must not offer it.
+    assert(!tools.has("rename_org"), "rename_org is session-only in Railyard and must not be a tool");
     assert(tools.get("update_project").inputSchema.properties.revision);
     assert(tools.get("set_org_catalog").inputSchema.required.includes("revision"));
     assert(tools.get("set_org_roles").inputSchema.required.includes("revision"));

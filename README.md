@@ -46,7 +46,6 @@ It speaks MCP over **stdio** and is written in TypeScript against the official
 | `server_info` | read | Server health: version, schema version, and whether persistence, auth and billing are configured. |
 | `list_orgs` | read | Organisations you belong to — id, slug, role, plan, billing status. |
 | `create_org` | write | Create a shared org; you become its owner. |
-| `rename_org` | write · owner | Change an org's display name. |
 | `delete_org` | write · **destructive** · owner | Delete a shared org **and every project in it**. No undo. |
 | `get_org_catalog` | read | The org's shared device-type library and revision ETag. |
 | `set_org_catalog` | write · **destructive** | Conditionally replace that library wholesale (not a merge). |

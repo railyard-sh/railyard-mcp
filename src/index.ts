@@ -488,20 +488,6 @@ server.registerTool(
 );
 
 server.registerTool(
-  "rename_org",
-  {
-    title: "Rename organisation",
-    description: "Change an organisation's display name. Requires the OWNER role in it.",
-    inputSchema: {
-      org: z.string().min(1).describe("The organisation to rename: id (org_…), slug, or name."),
-      name: z.string().min(1).describe("The new organisation name."),
-    },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-  },
-  ({ org, name }) => guard(async () => ok(await client.renameOrg(org, name))),
-);
-
-server.registerTool(
   "delete_org",
   {
     title: "Delete organisation (DESTRUCTIVE)",

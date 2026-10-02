@@ -103,10 +103,6 @@
       "description": "Create a new shared organisation; the token's user becomes its owner."
     },
     {
-      "name": "rename_org",
-      "description": "Change an organisation's display name (owner-only)."
-    },
-    {
       "name": "delete_org",
       "description": "Permanently delete a shared org and every project in it. Destructive; owner-only."
     },
