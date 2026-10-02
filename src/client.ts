@@ -550,12 +550,6 @@ export class RailyardClient {
     return this.request<Org>("POST", "/api/orgs", { body: { name } });
   }
 
-  /** PATCH /api/orgs/{id} — change an org's display name (owner-only). */
-  async renameOrg(orgRef: string, name: string): Promise<Org> {
-    const orgId = await this.requireOrgId(orgRef);
-    return this.request<Org>("PATCH", `/api/orgs/${encodeURIComponent(orgId)}`, { body: { name } });
-  }
-
   /** DELETE /api/orgs/{id} — delete a shared org and every project in it (owner-only). */
   async deleteOrg(orgRef: string): Promise<void> {
     const orgId = await this.requireOrgId(orgRef);
