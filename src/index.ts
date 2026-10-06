@@ -77,12 +77,19 @@ function fail(message: string): ToolResult {
   return { content: [{ type: "text", text: message }], isError: true };
 }
 
-/** Run a tool body, converting any thrown error into a readable isError result. */
+/**
+ * Run a tool body, converting any thrown error into a readable isError result. When the server
+ * gave a machine-readable code, it and the error's structured fields follow the message as JSON,
+ * so the model can act on them (a 402's requiredPlans and projectPass, a limit and its count).
+ */
 async function guard(fn: () => Promise<ToolResult>): Promise<ToolResult> {
   try {
     return await fn();
   } catch (e) {
-    if (e instanceof RailyardApiError) return fail(e.message);
+    if (e instanceof RailyardApiError) {
+      if (!e.code) return fail(e.message);
+      return fail(`${e.message}\n${JSON.stringify({ status: e.status, code: e.code, ...(e.details ?? {}) })}`);
+    }
     return fail(`Unexpected error: ${(e as Error).message}`);
   }
 }
@@ -479,8 +486,8 @@ server.registerTool(
     title: "Create organisation",
     description:
       "Create a new shared organisation; the token's user becomes its owner. Returns the org's id " +
-      "and slug, which other tools accept as `org`. Note that adding members to it needs a Team or " +
-      "Enterprise plan (see get_billing).",
+      "and slug, which other tools accept as `org`. Note that adding editors beyond the plan's limit " +
+      "needs a larger plan such as Team (see get_billing).",
     inputSchema: { name: z.string().min(1).describe("Name for the new organisation.") },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
@@ -663,9 +670,9 @@ server.registerTool(
     title: "Invite someone to an organisation",
     description:
       "Invite an email address to join an organisation at a role (default editor), and email them " +
-      "the invitation where the server has mail configured. Requires the OWNER role, and a current " +
-      "Team or Enterprise plan — a personal or Individual-plan org cannot add members (402), and " +
-      "neither can one whose plan has lapsed. Re-inviting a still-pending email updates its role. " +
+      "the invitation where the server has mail configured. Requires the OWNER role. Refused with " +
+      "402 plan_limit when the organisation's plan has no room for another editor — the error names " +
+      "the plans that would. Re-inviting a still-pending email updates its role. " +
       "An address that is already a member is refused (409).",
     inputSchema: {
       email: z.string().min(1).describe("The invitee's email address."),
@@ -719,8 +726,8 @@ server.registerTool(
     description:
       "Accept an invitation addressed to the token user's email, joining that organisation at the " +
       "invited role. Returns the joined org. Refused (403) if the invitation was addressed to " +
-      "someone else, and (402) if the organisation's plan has lapsed or been downgraded since the " +
-      "invitation was sent.",
+      "someone else, and (402 plan_limit) if the organisation's plan no longer has room for another " +
+      "editor.",
     inputSchema: { inviteId: z.string().min(1).describe("The invitation's id — from list_my_invites.") },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
@@ -734,10 +741,13 @@ server.registerTool(
   {
     title: "Get billing state",
     description:
-      "Read an organisation's plan and billing state: plan (individual/team/enterprise), status " +
-      "(trialing/active/past_due/canceled), seat count, trial end, current period end, whether it is " +
-      "currently entitled to edit (a lapsed org is read-only and its writes return 402), whether the " +
-      "caller may manage billing, and whether this server has Stripe self-serve configured at all. " +
+      "Read an organisation's plan and billing state: plan (community/pro/team/partner/enterprise), " +
+      "status (trialing/active/past_due/canceled), seat count, trial end, current period end, whether " +
+      "the paid subscription is current (`entitled`), what the organisation may do now " +
+      "(`entitlements`: rack limit per estate, editors, deliverables, branches, merge requests, live " +
+      "collaboration), the plans an owner can buy here (`checkoutPlans`), whether the caller may " +
+      "manage billing, and whether this server has Stripe self-serve configured at all. A lapsed plan " +
+      "never makes designs read-only: it falls back to Community rules and only paid features stop. " +
       "Any member may read it.",
     inputSchema: { org: orgArg },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
@@ -751,8 +761,10 @@ server.registerTool(
     title: "Get a Stripe billing link",
     description:
       "Mint a Stripe hosted-page URL for the organisation's OWNER to open in a browser: " +
-      "action=subscribe opens Checkout to start a subscription, action=manage opens the Customer " +
-      "Portal to change the card, switch plan or cancel. This only creates a link — it does not " +
+      "action=subscribe opens Checkout to start a subscription (Pro for a personal space, Team for a " +
+      "shared organisation; Partner is arranged by contacting Railyard, and a Project Pass is bought " +
+      "from the project in the app), action=manage opens the Customer Portal to change the card, " +
+      "switch plan or cancel. This only creates a link — it does not " +
       "charge anything or change the subscription; the owner completes or abandons that on Stripe's " +
       "page. Requires the OWNER role and Stripe configured on the server (503 otherwise). " +
       "action=subscribe conflicts (409) when a live subscription already exists — manage it instead; " +
