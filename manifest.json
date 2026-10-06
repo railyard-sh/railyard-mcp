@@ -76,7 +76,11 @@
     },
     {
       "name": "export_project",
-      "description": "Export a project into a downstream format and return the generated files, unresolved placements and warnings."
+      "description": "Export a project into a downstream format and return the generated files, unresolved placements and warnings. json is free on every plan; the NetBox, Nautobot and Design Builder formats are deliverables."
+    },
+    {
+      "name": "export_deliverable",
+      "description": "Generate a deliverable (build pack, cable schedule, labels, power schedule or report, NetBox or Nautobot bundle) from a saved project; needs a plan or Project Pass that includes deliverables when billing is on."
     },
     {
       "name": "create_project",
@@ -140,7 +144,7 @@
     },
     {
       "name": "invite_member",
-      "description": "Invite an email to join an organisation at a role (Team/Enterprise plan required)."
+      "description": "Invite an email to join an organisation at a role (within the plan's editor limit)."
     },
     {
       "name": "revoke_invite",
@@ -156,7 +160,7 @@
     },
     {
       "name": "get_billing",
-      "description": "Read an organisation's plan, status, seats and edit-entitlement."
+      "description": "Read an organisation's plan, status, seats and entitlements."
     },
     {
       "name": "billing_manage_url",

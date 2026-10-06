@@ -29,14 +29,16 @@ It speaks MCP over **stdio** and is written in TypeScript against the official
 | `delete_project` | write · **destructive** | Permanently delete a project. No undo. |
 | `move_project` | write | Move a project into another org you can write to, optionally renaming it in the same step. |
 
-**Validation & export** — these operate on a document, so each takes either a saved project
-(`ref`) or an inline `project` you have not saved yet. Neither changes anything stored.
+**Validation, export & deliverables** — validation and the raw JSON export take either a saved
+project (`ref`) or an inline `project` you have not saved yet. Deliverables are generated from a
+saved project. None of them changes anything stored.
 
 | Tool | Kind | Description |
 | --- | --- | --- |
 | `validate_project` | read | Current server-side rack-layout/site and power findings for a saved or inline project; structural hierarchy/cabling errors are rejected first. |
 | `list_export_formats` | read | The export targets this build supports (`nautobot-csv`, `netbox-csv`, `designbuilder-yaml`, `json`). |
-| `export_project` | read | Render a project into a format and return the files' content, unresolved placements and warnings. |
+| `export_project` | read | Render a project into a format and return the files' content, unresolved placements and warnings. `json` is free on every plan; the NetBox, Nautobot and Design Builder formats are deliverables. |
+| `export_deliverable` | read · may write local files | Generate a deliverable from a saved project: `build-pack` (PDF), `build-pack-preview`, `cable-schedule`, `cable-labels`, `power-schedule`, `power-report`, `netbox`, `nautobot` or `designbuilder`. Pass `saveTo` to write the files to a local directory. |
 
 **Organisations, members & billing**
 
@@ -55,11 +57,11 @@ It speaks MCP over **stdio** and is written in TypeScript against the official
 | `set_member_role` | write · owner | Change a member's role. |
 | `remove_member` | write · **destructive** · owner | Remove a member and drop their live sessions. |
 | `list_invites` | read · owner | An org's pending invitations. |
-| `invite_member` | write · owner | Invite an email at a role (needs a current Team/Enterprise plan). |
+| `invite_member` | write · owner | Invite an email at a role (within the plan's editor limit). |
 | `revoke_invite` | write · owner | Withdraw a pending invitation. |
 | `list_my_invites` | read | Invitations addressed to *your* email. |
 | `accept_invite` | write | Accept one, joining that org. |
-| `get_billing` | read | Plan, status, seats, trial/period end, and whether the org is currently entitled to edit. |
+| `get_billing` | read | Plan, status, seats, trial/period end, whether the subscription is current, and the org's entitlements. |
 | `billing_manage_url` | write · owner | Mint a Stripe Checkout or Customer Portal URL to open in a browser. Creates a link only — it charges nothing. |
 
 The destructive tools (`update_project`, `delete_project`, `delete_org`, `set_org_catalog`,
@@ -312,8 +314,13 @@ all-or-nothing, which is why the guidance above matters.
 - **Roles.** Reads need any membership. Project writes need **editor** or **owner** — a
   **viewer** gets a 403. Managing the org itself (rename/delete, members, invitations, billing)
   is **owner**-only.
-- **Billing.** If an org's plan has lapsed it becomes read-only and writes return **402**.
-  Inviting members additionally needs a current **Team or Enterprise** plan (402 otherwise).
+- **Billing.** Designing and the raw JSON export are free on every plan, and a lapsed plan never
+  makes a design read-only — it falls back to Community rules. On a server with billing on, a
+  **402** refuses a paid feature or growth past a plan limit: `plan_required` (for example a
+  deliverable on Community) or `plan_limit` (a rack or editor limit). The tool result gives a plain
+  message naming the plans that would allow it, and whether a Project Pass would, followed by the
+  server's `code` and structured fields as JSON. A server with billing off (every self-hosted
+  install) has no plan limits.
 - **Errors are readable.** HTTP failures are surfaced as `isError` tool results with a plain
   message, e.g. *"Forbidden (403): not a member of this organisation"*, *"Conflict (409): a
   project with that name already exists"*, *"Authentication failed (401): …"*.
@@ -337,9 +344,16 @@ all-or-nothing, which is why the guidance above matters.
 - **Live collaboration.** If a project is open in a live collaboration session in the app,
   coordinate with the people editing it. Revision checks prevent a stale MCP save from silently
   overwriting a newer room save, but they cannot decide whose intended change should win.
-- **Export output is truncated.** A large artefact is cut off in the tool reply with an
-  explicit marker (the byte count is always reported in full). Use the app's download for the
-  complete file.
+- **Export output is truncated.** A large text artefact is cut off in the tool reply with an
+  explicit marker (the byte count is always reported in full). A binary deliverable such as the
+  build-pack PDF comes back as base64 only when small; pass `saveTo` to `export_deliverable` to
+  write the complete files to a local directory (existing files are never overwritten).
+- **Deliverables need a plan on hosted Railyard.** The build pack, schedules, labels, power report
+  and the NetBox, Nautobot and Design Builder bundles need the Pro, Team or Partner plan, or a
+  Project Pass on that estate, when the server has billing on. They are generated from the stored
+  project, so an inline, unsaved `project` can only be exported as `json` there — save it first.
+  Older servers without the deliverables route still export the DCIM formats through
+  `/api/export`.
 - **`export_project` never silently drops data.** A placement whose `deviceTypeRef` matches no
   catalogue entry comes back under `unresolved` rather than vanishing; pass
   `placeholders: true` to emit it as a placeholder device type so the row still imports.

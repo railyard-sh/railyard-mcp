@@ -18,6 +18,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { helpText, resolveBaseUrl, runAuthHelper } from "./auth.js";
 import { RailyardApiError, RailyardClient, type ExportFile, type Project } from "./client.js";
+import { DELIVERABLE_KINDS, FORMAT_KINDS, exportDeliverable, isUnknownRoute } from "./deliverables.js";
 import { minimalProject } from "./project.js";
 
 // ---- configuration (from the environment) -----------------------------------
@@ -77,12 +78,19 @@ function fail(message: string): ToolResult {
   return { content: [{ type: "text", text: message }], isError: true };
 }
 
-/** Run a tool body, converting any thrown error into a readable isError result. */
+/**
+ * Run a tool body, converting any thrown error into a readable isError result. When the server
+ * gave a machine-readable code, it and the error's structured fields follow the message as JSON,
+ * so the model can act on them (a 402's requiredPlans and projectPass, a limit and its count).
+ */
 async function guard(fn: () => Promise<ToolResult>): Promise<ToolResult> {
   try {
     return await fn();
   } catch (e) {
-    if (e instanceof RailyardApiError) return fail(e.message);
+    if (e instanceof RailyardApiError) {
+      if (!e.code) return fail(e.message);
+      return fail(`${e.message}\n${JSON.stringify({ status: e.status, code: e.code, ...(e.details ?? {}) })}`);
+    }
     return fail(`Unexpected error: ${(e as Error).message}`);
   }
 }
@@ -258,7 +266,9 @@ server.registerTool(
     title: "List export formats",
     description:
       "List the export targets this Railyard build supports — each format's id (what export_project " +
-      "takes), a one-line description, and the file extension it produces.",
+      "takes), a one-line description, and the file extension it produces. json (the raw Project " +
+      "JSON) is free on every plan; netbox-csv, nautobot-csv and designbuilder-yaml are deliverables " +
+      "on a server with billing on (see export_deliverable).",
     inputSchema: {},
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
@@ -308,11 +318,16 @@ server.registerTool(
     description:
       "Export a project into a downstream format (see list_export_formats for the ids — e.g. " +
       "nautobot-csv, netbox-csv, designbuilder-yaml, json) and return the generated files' " +
-      "content, plus any unresolved placements and warnings. A placement whose deviceTypeRef matches " +
-      "no catalogue entry is REPORTED, never silently dropped: set placeholders=true to emit it as a " +
-      "placeholder device type so the row still imports. Targets that need prerequisite objects " +
-      "return the whole ordered bundle, not just the headline table. Large files are truncated in " +
-      "the reply — the app's download gives the complete artefact.",
+      "content, plus any unresolved placements and warnings where the server reports them. json is " +
+      "the raw Project JSON: free on every plan, for a saved project or an inline document. The " +
+      "NetBox, Nautobot and Design Builder formats are deliverables: for a saved project (`ref`) " +
+      "they are generated from the stored document and need a plan or Project Pass that includes " +
+      "deliverables when the server has billing on (402 plan_required otherwise, naming the plans " +
+      "that would). An inline `project` (not saved) can only be exported as json when the server " +
+      "has billing on; save it and pass `ref` instead. A placement whose deviceTypeRef matches no " +
+      "catalogue entry is REPORTED, never silently dropped: set placeholders=true to emit it as a " +
+      "placeholder device type so the row still imports. Large files are truncated in the reply — " +
+      "the app's download gives the complete artefact.",
     inputSchema: {
       format: z.string().min(1).describe("Export format id, e.g. \"nautobot-csv\". Use list_export_formats to see them."),
       ref: z.string().optional().describe("A saved project's id (prj_…) or slug to export."),
@@ -334,6 +349,16 @@ server.registerTool(
   },
   ({ format, ref, project, placeholders, fallbackLocation, org }) =>
     guard(async () => {
+      const kind = FORMAT_KINDS[format];
+      if (kind && ref && !project) {
+        try {
+          const res = await exportDeliverable(client, { ref, kind, org, options: { placeholders, fallbackLocation } });
+          return ok({ format, ...res });
+        } catch (e) {
+          // A server that predates the deliverables route still exports through /api/export.
+          if (!isUnknownRoute(e)) throw e;
+        }
+      }
       const doc = await documentFor(ref, project, org);
       const res = await client.exportProject(doc, format, { placeholders, fallbackLocation });
       return ok({
@@ -344,6 +369,56 @@ server.registerTool(
         files: res.files.map(renderExportFile),
       });
     }),
+);
+
+server.registerTool(
+  "export_deliverable",
+  {
+    title: "Export a deliverable",
+    description:
+      "Generate a deliverable from a saved project's stored document (main, or a merge request's " +
+      "draft with changeRequestId): build-pack (PDF), build-pack-preview (one rack, watermarked; " +
+      "needs rackId), cable-schedule, cable-labels, power-schedule, power-report, netbox, nautobot " +
+      "or designbuilder. On a server with billing on, deliverables need the Pro, Team or Partner " +
+      "plan, or a Project Pass on that estate, and the estate must be within its plan's rack limit; " +
+      "otherwise Railyard answers 402 (plan_required or plan_limit) naming the plans that would " +
+      "allow it — nothing is changed and the design stays editable. build-pack-preview is available " +
+      "on every plan. Text files are returned inline (truncated when large); a binary file such as " +
+      "the build-pack PDF is returned as base64 when small, or pass saveTo to write every file to a " +
+      "local directory and get its path back. The raw Project JSON is not a deliverable: use " +
+      "export_project with format json.",
+    inputSchema: {
+      kind: z.enum(DELIVERABLE_KINDS).describe("Which deliverable to generate."),
+      ref: z.string().min(1).describe("A saved project's id (prj_…), slug or name."),
+      changeRequestId: z.string().optional().describe("Generate from this merge request's draft instead of main."),
+      rackId: z.string().optional().describe("build-pack-preview: the rack to preview."),
+      netboxVersion: z.string().optional().describe("netbox: the NetBox release to target, e.g. \"4.2\"."),
+      placeholders: z
+        .boolean()
+        .optional()
+        .describe("netbox/nautobot/designbuilder: emit placements with no matching device type as placeholders."),
+      fallbackLocation: z
+        .string()
+        .optional()
+        .describe("netbox/nautobot/designbuilder: location name for racks with no resolvable site."),
+      saveTo: z
+        .string()
+        .optional()
+        .describe("A local directory to write the files into (created if missing; existing files are never overwritten)."),
+      org: orgArg,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
+  ({ kind, ref, changeRequestId, rackId, netboxVersion, placeholders, fallbackLocation, saveTo, org }) =>
+    guard(async () =>
+      ok(
+        await exportDeliverable(
+          client,
+          { ref, kind, org, changeRequestId, options: { rackId, netboxVersion, placeholders, fallbackLocation } },
+          saveTo,
+        ),
+      ),
+    ),
 );
 
 // ---- write tools ------------------------------------------------------------
@@ -479,8 +554,8 @@ server.registerTool(
     title: "Create organisation",
     description:
       "Create a new shared organisation; the token's user becomes its owner. Returns the org's id " +
-      "and slug, which other tools accept as `org`. Note that adding members to it needs a Team or " +
-      "Enterprise plan (see get_billing).",
+      "and slug, which other tools accept as `org`. Note that adding editors beyond the plan's limit " +
+      "needs a larger plan such as Team (see get_billing).",
     inputSchema: { name: z.string().min(1).describe("Name for the new organisation.") },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
@@ -663,9 +738,9 @@ server.registerTool(
     title: "Invite someone to an organisation",
     description:
       "Invite an email address to join an organisation at a role (default editor), and email them " +
-      "the invitation where the server has mail configured. Requires the OWNER role, and a current " +
-      "Team or Enterprise plan — a personal or Individual-plan org cannot add members (402), and " +
-      "neither can one whose plan has lapsed. Re-inviting a still-pending email updates its role. " +
+      "the invitation where the server has mail configured. Requires the OWNER role. Refused with " +
+      "402 plan_limit when the organisation's plan has no room for another editor — the error names " +
+      "the plans that would. Re-inviting a still-pending email updates its role. " +
       "An address that is already a member is refused (409).",
     inputSchema: {
       email: z.string().min(1).describe("The invitee's email address."),
@@ -719,8 +794,8 @@ server.registerTool(
     description:
       "Accept an invitation addressed to the token user's email, joining that organisation at the " +
       "invited role. Returns the joined org. Refused (403) if the invitation was addressed to " +
-      "someone else, and (402) if the organisation's plan has lapsed or been downgraded since the " +
-      "invitation was sent.",
+      "someone else, and (402 plan_limit) if the organisation's plan no longer has room for another " +
+      "editor.",
     inputSchema: { inviteId: z.string().min(1).describe("The invitation's id — from list_my_invites.") },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
@@ -734,10 +809,13 @@ server.registerTool(
   {
     title: "Get billing state",
     description:
-      "Read an organisation's plan and billing state: plan (individual/team/enterprise), status " +
-      "(trialing/active/past_due/canceled), seat count, trial end, current period end, whether it is " +
-      "currently entitled to edit (a lapsed org is read-only and its writes return 402), whether the " +
-      "caller may manage billing, and whether this server has Stripe self-serve configured at all. " +
+      "Read an organisation's plan and billing state: plan (community/pro/team/partner/enterprise), " +
+      "status (trialing/active/past_due/canceled), seat count, trial end, current period end, whether " +
+      "the paid subscription is current (`entitled`), what the organisation may do now " +
+      "(`entitlements`: rack limit per estate, editors, deliverables, branches, merge requests, live " +
+      "collaboration), the plans an owner can buy here (`checkoutPlans`), whether the caller may " +
+      "manage billing, and whether this server has Stripe self-serve configured at all. A lapsed plan " +
+      "never makes designs read-only: it falls back to Community rules and only paid features stop. " +
       "Any member may read it.",
     inputSchema: { org: orgArg },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
@@ -751,8 +829,10 @@ server.registerTool(
     title: "Get a Stripe billing link",
     description:
       "Mint a Stripe hosted-page URL for the organisation's OWNER to open in a browser: " +
-      "action=subscribe opens Checkout to start a subscription, action=manage opens the Customer " +
-      "Portal to change the card, switch plan or cancel. This only creates a link — it does not " +
+      "action=subscribe opens Checkout to start a subscription (Pro for a personal space, Team for a " +
+      "shared organisation; Partner is arranged by contacting Railyard, and a Project Pass is bought " +
+      "from the project in the app), action=manage opens the Customer Portal to change the card, " +
+      "switch plan or cancel. This only creates a link — it does not " +
       "charge anything or change the subscription; the owner completes or abandons that on Stripe's " +
       "page. Requires the OWNER role and Stripe configured on the server (503 otherwise). " +
       "action=subscribe conflicts (409) when a live subscription already exists — manage it instead; " +

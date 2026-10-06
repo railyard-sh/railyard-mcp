@@ -7,8 +7,10 @@
 //   - org selection    — org-scoped calls carry the `X-Org-Id` header, which the server
 //     membership-checks (403 if the caller is not a member). The header must be an org
 //     *id*; a slug or name supplied by the caller is resolved to an id via GET /api/orgs.
-//   - error surfacing  — non-2xx responses ({"error": "..."}) become RailyardApiError with
-//     a human-readable, status-aware message the tools relay straight to the model.
+//   - error surfacing  — non-2xx responses ({"error": "...", "code"?: "...", …}) become
+//     RailyardApiError with a human-readable, status-aware message the tools relay straight to
+//     the model. The server's machine-readable `code` and any structured fields (a 402's
+//     requiredPlans, limit, current…) are kept on the error rather than flattened into text.
 
 // ---- wire types (mirrors of backend structs) --------------------------------
 
@@ -28,7 +30,7 @@ export interface Org {
   slug: string;
   role?: string; // viewer | editor | owner
   personal: boolean;
-  plan: string; // individual | team | enterprise
+  plan: string; // community | pro | team | partner | enterprise
   status: string; // trialing | active | past_due | canceled
   trialEndsAt?: string;
   createdAt: string;
@@ -120,15 +122,21 @@ export interface Invite {
 
 /** An org's billing state. Mirror of api.billingView (GET /api/orgs/{id}/billing). */
 export interface Billing {
-  plan: string; // individual | team | enterprise
+  plan: string; // community | pro | team | partner | enterprise
   status: string; // trialing | active | past_due | canceled
   seats: number;
   trialEndsAt?: string;
   currentPeriodEnd?: string;
   hasSubscription: boolean;
-  entitled: boolean; // currently allowed to edit
+  /** The paid subscription is current. False never means read-only: a lapsed plan falls back to
+   *  Community rules, so designs stay editable and only paid features stop. */
+  entitled: boolean;
   canManage: boolean; // the caller is an owner
   configured: boolean; // Stripe self-serve is enabled on this server
+  /** What the organisation may do now (plan, limits, deliverables, branches, …). Newer servers. */
+  entitlements?: Record<string, unknown>;
+  /** The plans an owner can buy at checkout here ([] when billing is off). Newer servers. */
+  checkoutPlans?: string[];
 }
 
 /** Server capability/readiness report. Mirror of GET /api/health. */
@@ -194,33 +202,121 @@ export interface ExportOptions {
 
 // ---- errors -----------------------------------------------------------------
 
-/** An error carrying the HTTP status so tools can present it plainly. status 0 = transport failure. */
+/**
+ * An error carrying the HTTP status so tools can present it plainly. status 0 = transport failure.
+ * `code` is the server's machine-readable code (e.g. "plan_required") and `details` every other
+ * structured field of its error body, so a caller can act on them without parsing the message.
+ */
 export class RailyardApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
     public readonly bodyText?: string,
+    public readonly code?: string,
+    public readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "RailyardApiError";
   }
 }
 
-/** Pull the server's {"error": "..."} message out of a body, falling back to the raw text. */
-function serverMessage(text: string): string {
-  if (!text) return "";
+/** A server error body: {"error": "...", "code"?: "...", ...structured fields}. */
+export interface ServerError {
+  message: string;
+  code?: string;
+  /** Every field other than error and code, as the server sent it. */
+  details?: Record<string, unknown>;
+}
+
+/** Parse a server error body, keeping its code and structured fields; falls back to the raw text. */
+export function parseServerError(text: string): ServerError {
+  if (!text) return { message: "" };
   try {
-    const parsed = JSON.parse(text) as { error?: string };
-    if (parsed && typeof parsed.error === "string" && parsed.error) return parsed.error;
+    const parsed = JSON.parse(text) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const { error, code, ...rest } = parsed as Record<string, unknown>;
+      if (typeof error === "string" || typeof code === "string") {
+        return {
+          message: typeof error === "string" ? error : "",
+          ...(typeof code === "string" && code ? { code } : {}),
+          ...(Object.keys(rest).length ? { details: rest } : {}),
+        };
+      }
+    }
   } catch {
     // not JSON — fall through to the raw text
   }
-  return text.slice(0, 500);
+  return { message: text.slice(0, 500) };
+}
+
+/** Display names for plan ids. The server's catalogue (GET /api/plans) is authoritative. */
+const PLAN_NAMES: Record<string, string> = {
+  community: "Community",
+  "project-pass": "Project Pass",
+  pro: "Pro",
+  team: "Team",
+  partner: "Partner",
+  "self-hosted": "Self-hosted",
+  enterprise: "Enterprise",
+};
+
+/** A plan's display name, or its id when this build does not know it. */
+export function planName(id: string): string {
+  return PLAN_NAMES[id] ?? id;
+}
+
+/** "Pro, Team or Partner". */
+function orList(items: string[]): string {
+  if (items.length <= 1) return items.join("");
+  return `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
+}
+
+const FEATURE_NAMES: Record<string, string> = {
+  deliverables: "Deliverables (build pack, schedules, labels, power report, NetBox and Nautobot bundles) are",
+  branches: "Branches are",
+  mergeRequests: "Merge requests are",
+  liveCollaboration: "Live collaboration is",
+};
+
+/**
+ * Explain a 402. Railyard never makes data read-only for billing: a 402 refuses a paid feature
+ * (plan_required) or growth past a plan limit (plan_limit). The design stays editable and its raw
+ * JSON export stays free, so the message says so rather than calling the organisation lapsed.
+ */
+function describePaymentRequired(err: ServerError): string {
+  const head = `Payment required (402)${err.message ? `: ${err.message}` : ""}`;
+  const d = err.details ?? {};
+  const required = Array.isArray(d.requiredPlans)
+    ? d.requiredPlans.filter((p): p is string => typeof p === "string").map(planName)
+    : [];
+  const options = [
+    required.length ? `move to the ${orList(required)} plan` : "",
+    d.projectPass === true ? "buy a Project Pass for this estate (a one-off purchase for a project in a personal space)" : "",
+  ].filter(Boolean);
+  const upgrade = options.length
+    ? ` To unlock it, ${options.join(", or ")} in the Railyard app.`
+    : " A paid plan is needed; see the billing settings in the Railyard app.";
+  const current = typeof d.plan === "string" ? ` (current plan: ${planName(d.plan)})` : "";
+  if (err.code === "plan_required") {
+    const what = (typeof d.feature === "string" && FEATURE_NAMES[d.feature]) || "This feature is";
+    return `${head}. ${what} not included in this plan${current}.${upgrade} Nothing was changed: the design stays editable and its raw JSON export stays free.`;
+  }
+  if (err.code === "plan_limit") {
+    const resource = typeof d.resource === "string" ? d.resource : "this resource";
+    const where = d.scope === "estate" ? " in this estate" : d.scope === "organisation" ? " in this organisation" : "";
+    const counts = typeof d.limit === "number"
+      ? ` The plan${current} allows ${d.limit} ${resource}${where}` +
+        (typeof d.current === "number" ? ` and there are ${d.current}` : "") + "."
+      : "";
+    return `${head}. Plan limit reached for ${resource}.${counts}${upgrade} A limit only stops growth: existing work stays editable and exportable.`;
+  }
+  return `${head}.${upgrade} Railyard never makes a design read-only for billing; its raw JSON export stays free.`;
 }
 
 /** Turn an HTTP status + body into a readable, actionable message. */
 function describeError(status: number, text: string): string {
-  const detail = serverMessage(text);
+  const parsed = parseServerError(text);
+  const detail = parsed.message;
   const suffix = detail ? `: ${detail}` : "";
   switch (status) {
     case 400:
@@ -228,7 +324,7 @@ function describeError(status: number, text: string): string {
     case 401:
       return `Authentication failed (401)${suffix}. Check RAILYARD_TOKEN is a current "ry_…" personal access token.`;
     case 402:
-      return `Payment required (402)${suffix}. This organisation's plan has lapsed, so it is read-only until renewed.`;
+      return describePaymentRequired(parsed);
     case 403:
       return `Forbidden (403)${suffix}. The token's user is not a member of this organisation, or lacks the role this action needs (writes need editor+; member, invite and billing changes need owner).`;
     case 404:
@@ -272,6 +368,36 @@ interface RequestOptions {
 interface RequestResult<T> {
   value: T;
   response: Response;
+}
+
+/** A non-2xx response as a RailyardApiError, keeping the server's code and structured fields. */
+function apiError(status: number, text: string): RailyardApiError {
+  const parsed = parseServerError(text);
+  return new RailyardApiError(status, describeError(status, text), text, parsed.code, parsed.details);
+}
+
+/** A file the server sent as the response body (a deliverable download). */
+export interface DownloadedFile {
+  /** From Content-Disposition, or "" when the server gave none. */
+  filename: string;
+  /** The Content-Type without parameters, e.g. "application/zip". */
+  contentType: string;
+  bytes: Buffer;
+}
+
+/** The filename in a Content-Disposition header (RFC 6266: filename*= wins over filename=). */
+export function dispositionFilename(header: string | null): string {
+  if (!header) return "";
+  const extended = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(header);
+  if (extended) {
+    try {
+      return decodeURIComponent(extended[1].trim());
+    } catch {
+      // a malformed escape — fall back to the plain parameter
+    }
+  }
+  const plain = /filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(header);
+  return (plain?.[1] ?? plain?.[2] ?? "").trim();
 }
 
 const revisionETagPattern = /^"\d+"$/;
@@ -320,9 +446,7 @@ export class RailyardClient {
       throw new RailyardApiError(0, `Could not reach Railyard at ${this.baseUrl} — ${(e as Error).message}`);
     }
     const text = await res.text();
-    if (!res.ok) {
-      throw new RailyardApiError(res.status, describeError(res.status, text), text);
-    }
+    if (!res.ok) throw apiError(res.status, text);
     if (!text) return { value: undefined as T, response: res }; // 204 No Content (e.g. delete)
     try {
       return { value: JSON.parse(text) as T, response: res };
@@ -333,6 +457,22 @@ export class RailyardClient {
 
   private async request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
     return (await this.requestResult<T>(method, path, opts)).value;
+  }
+
+  /** Send a request whose success body is a file (bytes, not JSON). Errors behave as request(). */
+  async download(method: string, path: string, opts: RequestOptions = {}): Promise<DownloadedFile> {
+    let res: Response;
+    try {
+      res = await this.send(method, path, opts);
+    } catch (e) {
+      throw new RailyardApiError(0, `Could not reach Railyard at ${this.baseUrl} — ${(e as Error).message}`);
+    }
+    if (!res.ok) throw apiError(res.status, await res.text());
+    return {
+      filename: dispositionFilename(res.headers.get("Content-Disposition")),
+      contentType: (res.headers.get("Content-Type") ?? "application/octet-stream").split(";")[0].trim().toLowerCase(),
+      bytes: Buffer.from(await res.arrayBuffer()),
+    };
   }
 
   private async requestRevisioned<T>(method: string, path: string, opts: RequestOptions = {}): Promise<Revisioned<T>> {
