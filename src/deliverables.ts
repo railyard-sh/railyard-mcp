@@ -19,6 +19,7 @@ import { inflateRawSync } from "node:zlib";
 import {
   parseServerError,
   RailyardApiError,
+  sanitiseText,
   type DownloadedFile,
   type ExportResult,
   type RailyardClient,
@@ -162,7 +163,10 @@ export function isUnknownRoute(error: unknown): boolean {
   if (!(error instanceof RailyardApiError) || (error.status !== 404 && error.status !== 405) || error.code) {
     return false;
   }
-  const message = parseServerError(error.bodyText ?? "").message.trim().toLowerCase();
+  // Go's default mux answers in plain text, so an unrecognised body is read here (never relayed).
+  const body = error.bodyText ?? "";
+  const parsed = parseServerError(body);
+  const message = (parsed.unrecognised ? sanitiseText(body, 100) : parsed.message).trim().toLowerCase();
   return message === "" || message === "not found" || message === "method not allowed" || message.startsWith("404 page not found");
 }
 
