@@ -20,6 +20,7 @@ import { helpText, resolveBaseUrl, runAuthHelper } from "./auth.js";
 import { RailyardApiError, RailyardClient, type ExportFile, type Project } from "./client.js";
 import { DELIVERABLE_KINDS, FORMAT_KINDS, exportDeliverable, isUnknownRoute } from "./deliverables.js";
 import { minimalProject } from "./project.js";
+import { DATA_NOT_INSTRUCTIONS } from "./instructions.js";
 
 // ---- configuration (from the environment) -----------------------------------
 
@@ -158,7 +159,7 @@ function renderExportFile(f: ExportFile): { name: string; mime: string; bytes: n
 
 const server = new McpServer(
   { name: "railyard-mcp", version: "0.2.1" },
-  { capabilities: { tools: {} } },
+  { capabilities: { tools: {} }, instructions: DATA_NOT_INSTRUCTIONS },
 );
 
 // ---- read tools -------------------------------------------------------------
@@ -500,7 +501,8 @@ server.registerTool(
       name: z.string().min(1).describe("The new project name."),
       org: orgArg,
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    // Destructive: it overwrites the name and the URL slug, so links to the old slug stop working.
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   },
   ({ id, name, org }) => guard(async () => ok(await client.renameProject(id, name, org))),
 );
@@ -541,7 +543,7 @@ server.registerTool(
       name: z.string().optional().describe("Optional new name, applied as part of the move (to settle a name clash in the destination)."),
       org: orgArg,
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   },
   ({ id, toOrg, name, org }) => guard(async () => ok(await client.moveProject(id, toOrg, org, name))),
 );
@@ -689,7 +691,7 @@ server.registerTool(
       role: roleArg,
       org: orgArg,
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   },
   ({ userId, role, org }) =>
     guard(async () => {
@@ -749,7 +751,7 @@ server.registerTool(
         .describe("Role to grant on acceptance: viewer (read-only), editor (can create and change projects) or owner (full control). Defaults to editor."),
       org: orgArg,
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   },
   ({ email, role, org }) => guard(async () => ok(await client.createInvite(email, role, org))),
 );
@@ -765,7 +767,7 @@ server.registerTool(
       inviteId: z.string().min(1).describe("The invitation's id — from list_invites."),
       org: orgArg,
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   },
   ({ inviteId, org }) =>
     guard(async () => {
