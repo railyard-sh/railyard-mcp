@@ -95,22 +95,6 @@
       "description": "Rename a project, updating its display name and URL slug together."
     },
     {
-      "name": "delete_project",
-      "description": "Permanently delete a project and its estate. Destructive; no undo."
-    },
-    {
-      "name": "move_project",
-      "description": "Move a project into another organisation you can write to, optionally renaming it."
-    },
-    {
-      "name": "create_org",
-      "description": "Create a new shared organisation; the token's user becomes its owner."
-    },
-    {
-      "name": "delete_org",
-      "description": "Permanently delete a shared org and every project in it. Destructive; owner-only."
-    },
-    {
       "name": "get_org_catalog",
       "description": "Read an organisation's shared device-type library and revision ETag."
     },
@@ -131,40 +115,16 @@
       "description": "List an organisation's members \u2014 user id, email, role and joined-at."
     },
     {
-      "name": "set_member_role",
-      "description": "Change an existing member's role (owner-only)."
-    },
-    {
-      "name": "remove_member",
-      "description": "Remove a member from an organisation. Destructive; owner-only."
-    },
-    {
       "name": "list_invites",
       "description": "List an organisation's pending invitations (owner-only)."
-    },
-    {
-      "name": "invite_member",
-      "description": "Invite an email to join an organisation at a role (within the plan's editor limit)."
-    },
-    {
-      "name": "revoke_invite",
-      "description": "Withdraw a pending invitation (owner-only)."
     },
     {
       "name": "list_my_invites",
       "description": "List invitations addressed to the token user's own email."
     },
     {
-      "name": "accept_invite",
-      "description": "Accept an invitation addressed to the token user's email, joining that organisation."
-    },
-    {
       "name": "get_billing",
       "description": "Read an organisation's plan, status, seats and entitlements."
-    },
-    {
-      "name": "billing_manage_url",
-      "description": "Mint a Stripe Checkout or Customer Portal URL for the owner to open in a browser."
     }
   ],
   "compatibility": {
