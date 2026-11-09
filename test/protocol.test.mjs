@@ -86,6 +86,16 @@ test("stdio initialization exposes revision-safe project, catalogue and role too
     // Renaming an org is owner-level administration the API keeps to browser sessions (railyard#555),
     // so a token-driven server must not offer it.
     assert(!tools.has("rename_org"), "rename_org is session-only in Railyard and must not be a tool");
+    // So are deleting or moving a project, creating or deleting an org, member and invitation changes,
+    // accepting an invitation and opening billing: a token gets 403 session_required (railyard#690).
+    for (const name of [
+      "delete_project", "move_project", "create_org", "delete_org", "set_member_role", "remove_member",
+      "invite_member", "revoke_invite", "accept_invite", "billing_manage_url",
+    ]) {
+      assert(!tools.has(name), `${name} is session-only in Railyard and must not be a tool`);
+    }
+    // The client is told up front that those actions belong in the web app.
+    assert.match(client.getInstructions() ?? "", /Railyard web app/);
     assert(tools.get("update_project").inputSchema.properties.revision);
     assert(tools.get("set_org_catalog").inputSchema.required.includes("revision"));
     assert(tools.get("set_org_roles").inputSchema.required.includes("revision"));

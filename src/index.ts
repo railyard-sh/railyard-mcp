@@ -2,14 +2,16 @@
 // Railyard MCP server (stdio).
 //
 // Exposes Railyard's project + organisation API to an MCP client (Claude Desktop, etc.)
-// as tools: projects (list/read/create/update/rename/move/delete), validation and export,
-// organisations, members and invitations, and billing state. Authentication is a Railyard
-// personal access token — see README.md.
+// as tools: projects (list/read/create/update/rename), validation and export, organisations and
+// their shared libraries, the member and invitation lists, and billing state. Authentication is a
+// Railyard personal access token — see README.md.
 //
-// Not exposed, deliberately: personal-access-token management, account deletion and the
-// starter-example claim are gated to an interactive browser session server-side, so a token
-// cannot drive them; the OAuth/magic-link routes and the Stripe webhook are not client-callable;
-// and live collaboration is a WebSocket protocol, not a request/response tool.
+// Not exposed, deliberately: Railyard keeps owner-level and irreversible actions to an interactive
+// browser session, and answers a token with 403 session_required, so no tool offers them: deleting
+// or moving a project, creating or deleting an organisation, changing members or invitations,
+// accepting an invitation, opening billing, managing tokens and deleting the account. The
+// OAuth/magic-link routes and the Stripe webhook are not client-callable, and live collaboration is
+// a WebSocket protocol, not a request/response tool.
 //
 // Transport is stdio: stdout is the JSON-RPC channel, so ALL diagnostics go to stderr.
 
@@ -106,10 +108,6 @@ const orgArg = z
       "Use list_orgs to see the options.",
   );
 
-const roleArg = z
-  .enum(["viewer", "editor", "owner"])
-  .describe("viewer = read-only, editor = can create and change projects, owner = full control including members and billing.");
-
 const revisionArg = z
   .string()
   .regex(/^"\d+"$/)
@@ -156,9 +154,17 @@ function renderExportFile(f: ExportFile): { name: string; mime: string; bytes: n
 
 // ---- server -----------------------------------------------------------------
 
+/** Told to the client at initialisation, so the model sends the user to the app instead of retrying. */
+const BROWSER_ONLY_INSTRUCTIONS =
+  "Railyard keeps some actions to a signed-in browser, and refuses them for this server's access token " +
+  "(403 session_required): deleting or moving a project, creating or deleting an organisation, changing " +
+  "members, roles or invitations, accepting or declining an invitation, and subscribing or managing billing. " +
+  "No tool here performs them. When the user asks for one, tell them to do it in the Railyard web app; " +
+  "the token is fine and needs no replacing.";
+
 const server = new McpServer(
   { name: "railyard-mcp", version: "0.2.1" },
-  { capabilities: { tools: {} } },
+  { capabilities: { tools: {} }, instructions: BROWSER_ONLY_INSTRUCTIONS },
 );
 
 // ---- read tools -------------------------------------------------------------
@@ -247,9 +253,10 @@ server.registerTool(
   {
     title: "Server info",
     description:
-      "Report the Railyard server's health and capabilities: version, the project schemaVersion it " +
-      "understands, whether persistence (a database) and authentication are enabled, and whether " +
-      "Stripe billing is configured. Useful to confirm the server is reachable and which features exist.",
+      "Report the Railyard server's health and capabilities: its mode (hosted or local), the project " +
+      "schemaVersion it understands, whether persistence (a database) and authentication are enabled, " +
+      "and whether Stripe billing, project workflows (branches and merge requests) and the hosted MCP " +
+      "connector are on. Useful to confirm the server is reachable and which features exist.",
     inputSchema: {},
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
@@ -505,80 +512,7 @@ server.registerTool(
   ({ id, name, org }) => guard(async () => ok(await client.renameProject(id, name, org))),
 );
 
-server.registerTool(
-  "delete_project",
-  {
-    title: "Delete project (DESTRUCTIVE)",
-    description:
-      "Permanently delete a project and its entire estate. DESTRUCTIVE and NOT reversible — there " +
-      "is no undo. Any live collaboration sessions on it are dropped. (Write: editor/owner role required.)",
-    inputSchema: {
-      id: z.string().min(1).describe("The project's id (prj_…) to delete."),
-      org: orgArg,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-  },
-  ({ id, org }) =>
-    guard(async () => {
-      await client.deleteProject(id, org);
-      return ok({ deleted: id });
-    }),
-);
-
-server.registerTool(
-  "move_project",
-  {
-    title: "Move project to another organisation",
-    description:
-      "Move a project out of its current organisation into another one the token user can write to. " +
-      "`toOrg` is the destination org (id, slug or name); `org` is the source org it currently lives " +
-      "in (defaults as usual). Requires an editor/owner role in BOTH organisations. If the name is " +
-      "already taken in the destination the move conflicts (409) — pass `name` to rename the project " +
-      "as part of the move; check_project_name against `toOrg` tells you in advance.",
-    inputSchema: {
-      id: z.string().min(1).describe("The project's id (prj_…) to move."),
-      toOrg: z.string().min(1).describe("Destination organisation: id (org_…), slug, or name."),
-      name: z.string().optional().describe("Optional new name, applied as part of the move (to settle a name clash in the destination)."),
-      org: orgArg,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-  },
-  ({ id, toOrg, name, org }) => guard(async () => ok(await client.moveProject(id, toOrg, org, name))),
-);
-
 // ---- organisations ----------------------------------------------------------
-
-server.registerTool(
-  "create_org",
-  {
-    title: "Create organisation",
-    description:
-      "Create a new shared organisation; the token's user becomes its owner. Returns the org's id " +
-      "and slug, which other tools accept as `org`. Note that adding editors beyond the plan's limit " +
-      "needs a larger plan such as Team (see get_billing).",
-    inputSchema: { name: z.string().min(1).describe("Name for the new organisation.") },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-  },
-  ({ name }) => guard(async () => ok(await client.createOrg(name))),
-);
-
-server.registerTool(
-  "delete_org",
-  {
-    title: "Delete organisation (DESTRUCTIVE)",
-    description:
-      "Permanently delete a shared organisation AND every project inside it. DESTRUCTIVE and NOT " +
-      "reversible. Requires the OWNER role. A personal organisation cannot be deleted (400). " +
-      "Move out any project you want to keep first (see move_project).",
-    inputSchema: { org: z.string().min(1).describe("The organisation to delete: id (org_…), slug, or name.") },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-  },
-  ({ org }) =>
-    guard(async () => {
-      await client.deleteOrg(org);
-      return ok({ deleted: org });
-    }),
-);
 
 server.registerTool(
   "get_org_catalog",
@@ -668,55 +602,12 @@ server.registerTool(
     title: "List organisation members",
     description:
       "List an organisation's members — user id, email, name, role (viewer/editor/owner) and when " +
-      "they joined. Any member may read the roster. The user id is what set_member_role and " +
-      "remove_member take.",
+      "they joined. Any member may read the roster. Changing a role or removing a member is done by " +
+      "an owner in the Railyard web app; an access token can't.",
     inputSchema: { org: orgArg },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   ({ org }) => guard(async () => ok(await client.members(org))),
-);
-
-server.registerTool(
-  "set_member_role",
-  {
-    title: "Change a member's role",
-    description:
-      "Change an existing member's role in an organisation. Requires the OWNER role. Demoting the " +
-      "last remaining owner is refused (409) — promote someone else first. The member's live " +
-      "collaboration sessions are dropped so they reconnect with the new role.",
-    inputSchema: {
-      userId: z.string().min(1).describe("The member's user id (usr_…) — from list_members."),
-      role: roleArg,
-      org: orgArg,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  },
-  ({ userId, role, org }) =>
-    guard(async () => {
-      await client.setMemberRole(userId, role, org);
-      return ok({ userId, role });
-    }),
-);
-
-server.registerTool(
-  "remove_member",
-  {
-    title: "Remove a member (DESTRUCTIVE)",
-    description:
-      "Remove a member from an organisation, revoking their access to all of its projects and " +
-      "dropping their live sessions at once. Requires the OWNER role. Removing the last owner is " +
-      "refused (409). The subscription's seat count is reconciled afterwards.",
-    inputSchema: {
-      userId: z.string().min(1).describe("The member's user id (usr_…) — from list_members."),
-      org: orgArg,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
-  },
-  ({ userId, org }) =>
-    guard(async () => {
-      await client.removeMember(userId, org);
-      return ok({ removed: userId });
-    }),
 );
 
 server.registerTool(
@@ -733,73 +624,17 @@ server.registerTool(
 );
 
 server.registerTool(
-  "invite_member",
-  {
-    title: "Invite someone to an organisation",
-    description:
-      "Invite an email address to join an organisation at a role (default editor), and email them " +
-      "the invitation where the server has mail configured. Requires the OWNER role. Refused with " +
-      "402 plan_limit when the organisation's plan has no room for another editor — the error names " +
-      "the plans that would. Re-inviting a still-pending email updates its role. " +
-      "An address that is already a member is refused (409).",
-    inputSchema: {
-      email: z.string().min(1).describe("The invitee's email address."),
-      role: roleArg
-        .optional()
-        .describe("Role to grant on acceptance: viewer (read-only), editor (can create and change projects) or owner (full control). Defaults to editor."),
-      org: orgArg,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  },
-  ({ email, role, org }) => guard(async () => ok(await client.createInvite(email, role, org))),
-);
-
-server.registerTool(
-  "revoke_invite",
-  {
-    title: "Revoke a pending invitation",
-    description:
-      "Withdraw a pending invitation so it can no longer be accepted. Requires the OWNER role. " +
-      "Has no effect on someone who has already joined — use remove_member for that.",
-    inputSchema: {
-      inviteId: z.string().min(1).describe("The invitation's id — from list_invites."),
-      org: orgArg,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  },
-  ({ inviteId, org }) =>
-    guard(async () => {
-      await client.revokeInvite(inviteId, org);
-      return ok({ revoked: inviteId });
-    }),
-);
-
-server.registerTool(
   "list_my_invites",
   {
     title: "List my pending invitations",
     description:
       "List invitations addressed to the token user's own email — organisations they have been " +
-      "invited to but not yet joined. Pass an id from here to accept_invite.",
+      "invited to but not yet joined. The user accepts or declines one in the Railyard web app; an " +
+      "access token can't.",
     inputSchema: {},
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   () => guard(async () => ok(await client.myInvites())),
-);
-
-server.registerTool(
-  "accept_invite",
-  {
-    title: "Accept an invitation",
-    description:
-      "Accept an invitation addressed to the token user's email, joining that organisation at the " +
-      "invited role. Returns the joined org. Refused (403) if the invitation was addressed to " +
-      "someone else, and (402 plan_limit) if the organisation's plan no longer has room for another " +
-      "editor.",
-    inputSchema: { inviteId: z.string().min(1).describe("The invitation's id — from list_my_invites.") },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-  },
-  ({ inviteId }) => guard(async () => ok(await client.acceptInvite(inviteId))),
 );
 
 // ---- billing ----------------------------------------------------------------
@@ -821,32 +656,6 @@ server.registerTool(
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   ({ org }) => guard(async () => ok(await client.billing(org))),
-);
-
-server.registerTool(
-  "billing_manage_url",
-  {
-    title: "Get a Stripe billing link",
-    description:
-      "Mint a Stripe hosted-page URL for the organisation's OWNER to open in a browser: " +
-      "action=subscribe opens Checkout to start a subscription (Pro for a personal space, Team for a " +
-      "shared organisation; Partner is arranged by contacting Railyard, and a Project Pass is bought " +
-      "from the project in the app), action=manage opens the Customer Portal to change the card, " +
-      "switch plan or cancel. This only creates a link — it does not " +
-      "charge anything or change the subscription; the owner completes or abandons that on Stripe's " +
-      "page. Requires the OWNER role and Stripe configured on the server (503 otherwise). " +
-      "action=subscribe conflicts (409) when a live subscription already exists — manage it instead; " +
-      "action=manage needs an existing billing account (400 before the first subscription).",
-    inputSchema: {
-      action: z
-        .enum(["subscribe", "manage"])
-        .describe("subscribe = Stripe Checkout for a new subscription; manage = Customer Portal for an existing one."),
-      org: orgArg,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-  },
-  ({ action, org }) =>
-    guard(async () => ok(await client.billingURL(action === "subscribe" ? "checkout" : "portal", org))),
 );
 
 // ---- boot -------------------------------------------------------------------

@@ -161,6 +161,9 @@ Not working?
 
 - **401 / authentication failed** — the token is wrong, expired or revoked. Mint a fresh
   one. Make sure it starts with `ry_`.
+- **403 / browser sign-in required** (`session_required`) — the token is fine, but the action
+  (deleting or moving a project, member, invitation or billing changes, …) is one Railyard keeps
+  to the web app. Do it there.
 - **Could not reach Railyard** — hosted installs use `https://railyard.sh` automatically.
   If you set `RAILYARD_BASE_URL`, check that it points at a running backend with a database
   configured; the project/org API only exists in that mode.

@@ -26,8 +26,6 @@ It speaks MCP over **stdio** and is written in TypeScript against the official
 | `create_project` | write | Create a new, empty project and save it. |
 | `update_project` | write · **destructive** | Conditionally save a project via full-document PUT. Merges partial fields by default; can replace the whole document. |
 | `rename_project` | write | Change a project's name + URL slug. |
-| `delete_project` | write · **destructive** | Permanently delete a project. No undo. |
-| `move_project` | write | Move a project into another org you can write to, optionally renaming it in the same step. |
 
 **Validation, export & deliverables** — validation and the raw JSON export take either a saved
 project (`ref`) or an inline `project` you have not saved yet. Deliverables are generated from a
@@ -47,30 +45,25 @@ saved project. None of them changes anything stored.
 | `whoami` | read | The user your token authenticates as (id, email, name). |
 | `server_info` | read | Server health: version, schema version, and whether persistence, auth and billing are configured. |
 | `list_orgs` | read | Organisations you belong to — id, slug, role, plan, billing status. |
-| `create_org` | write | Create a shared org; you become its owner. |
-| `delete_org` | write · **destructive** · owner | Delete a shared org **and every project in it**. No undo. |
 | `get_org_catalog` | read | The org's shared device-type library and revision ETag. |
 | `set_org_catalog` | write · **destructive** | Conditionally replace that library wholesale (not a merge). |
 | `get_org_roles` | read | The org's shared device-role vocabulary and revision ETag. |
 | `set_org_roles` | write · **destructive** | Conditionally replace the shared role vocabulary wholesale. |
 | `list_members` | read | Roster: user id, email, role, joined-at. |
-| `set_member_role` | write · owner | Change a member's role. |
-| `remove_member` | write · **destructive** · owner | Remove a member and drop their live sessions. |
 | `list_invites` | read · owner | An org's pending invitations. |
-| `invite_member` | write · owner | Invite an email at a role (within the plan's editor limit). |
-| `revoke_invite` | write · owner | Withdraw a pending invitation. |
 | `list_my_invites` | read | Invitations addressed to *your* email. |
-| `accept_invite` | write | Accept one, joining that org. |
 | `get_billing` | read | Plan, status, seats, trial/period end, whether the subscription is current, and the org's entitlements. |
-| `billing_manage_url` | write · owner | Mint a Stripe Checkout or Customer Portal URL to open in a browser. Creates a link only — it charges nothing. |
 
-The destructive tools (`update_project`, `delete_project`, `delete_org`, `set_org_catalog`,
-`set_org_roles`, `remove_member`) are annotated with the MCP `destructiveHint`, so clients that surface tool
-safety hints will flag them.
+The destructive tools (`update_project`, `set_org_catalog`, `set_org_roles`) are annotated with the MCP
+`destructiveHint`, so clients that surface tool safety hints will flag them.
 
-**Not exposed, deliberately.** Personal-access-token management, account deletion and the
-starter-example claim are gated to an interactive browser session server-side — a token cannot
-drive them (see [Auth model](#auth-model-why-a-pat)). The OAuth/magic-link routes and the Stripe
+**Browser-only, so not exposed.** Railyard keeps owner-level and irreversible actions to an
+interactive browser session and refuses a personal access token with **403** `session_required`:
+deleting or moving a project, creating or deleting an organisation, changing members, roles or
+invitations, accepting or declining an invitation, opening billing (Checkout, the Customer Portal or
+a Project Pass), managing tokens, deleting the account and claiming the starter example. This server
+has no tools for them; the user does them in the Railyard web app (see
+[Auth model](#auth-model-why-a-pat)). The OAuth/magic-link routes and the Stripe
 webhook are not client-callable. Live collaboration is a WebSocket protocol rather than
 request/response, so it has no tool; see the caveat on concurrent edits below.
 
@@ -313,7 +306,11 @@ all-or-nothing, which is why the guidance above matters.
   it and returns **403** if the token's user isn't a member.
 - **Roles.** Reads need any membership. Project writes need **editor** or **owner** — a
   **viewer** gets a 403. Managing the org itself (rename/delete, members, invitations, billing)
-  is **owner**-only.
+  is **owner**-only and happens in the web app.
+- **Browser-only actions.** A valid token on an action Railyard keeps to a browser gets **403**
+  `session_required`; the tool result says to do it in the web app and that the token is fine.
+  A **401** always means the token itself is missing, mistyped, expired or revoked (the server
+  sends `WWW-Authenticate: Bearer error="invalid_token"`), so mint a new one.
 - **Billing.** Designing and the raw JSON export are free on every plan, and a lapsed plan never
   makes a design read-only — it falls back to Community rules. On a server with billing on, a
   **402** refuses a paid feature or growth past a plan limit: `plan_required` (for example a

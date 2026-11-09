@@ -103,3 +103,41 @@ test("other errors keep the server's code", async () => {
     await assert.rejects(newClient(baseUrl).health(), (error) => error.code === "last_project_admin" && /Conflict \(409\)/.test(error.message));
   });
 });
+
+test("a valid token on a browser-only action is told to use the web app, not to replace the token", async () => {
+  const body = { error: "this action needs an interactive sign-in in the Railyard web app; an access token can't perform it", code: "session_required" };
+  await withServer((_request, response) => json(response, 403, body), async (baseUrl) => {
+    await assert.rejects(newClient(baseUrl).health(), (error) => {
+      assert(error instanceof RailyardApiError);
+      assert.equal(error.status, 403);
+      assert.equal(error.code, "session_required");
+      assert.match(error.message, /Browser sign-in required \(403\)/);
+      assert.match(error.message, /Railyard web app/);
+      assert.match(error.message, /no need to replace it/);
+      assert.doesNotMatch(error.message, /mint a new/i);
+      return true;
+    });
+  });
+});
+
+test("an older server's 401 for a browser-only action gets the same advice", async () => {
+  await withServer((_request, response) => json(response, 401, { error: "session sign-in required" }), async (baseUrl) => {
+    await assert.rejects(newClient(baseUrl).health(), (error) => {
+      assert.match(error.message, /Browser sign-in required \(401\)/);
+      assert.match(error.message, /Railyard web app/);
+      return true;
+    });
+  });
+});
+
+test("an invalid or expired token says to mint a new one", async () => {
+  const body = { error: "the access token is invalid, expired or revoked", code: "invalid_token" };
+  await withServer((_request, response) => json(response, 401, body), async (baseUrl) => {
+    await assert.rejects(newClient(baseUrl).health(), (error) => {
+      assert.equal(error.code, "invalid_token");
+      assert.match(error.message, /Authentication failed \(401\)/);
+      assert.match(error.message, /mint a new/);
+      return true;
+    });
+  });
+});

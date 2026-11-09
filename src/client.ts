@@ -139,15 +139,17 @@ export interface Billing {
   checkoutPlans?: string[];
 }
 
-/** Server capability/readiness report. Mirror of GET /api/health. */
+/** Server capability report. Mirror of GET /api/health (no build version, by design). */
 export interface Health {
-  status: string; // ok | degraded
-  version: string;
+  status: string; // ok
+  mode?: string; // hosted (a database is configured) | local
   schemaVersion: string;
-  persistence: boolean; // a database is configured and reachable
+  persistence: boolean; // a database is configured
   auth: boolean;
   landing: boolean;
   billing: boolean; // Stripe self-serve is configured
+  projectWorkflows?: boolean; // branches, merge requests and project access management
+  mcp?: boolean; // the hosted /mcp connector is enabled
 }
 
 /** An available export target. Mirror of api.formatInfo (GET /api/formats). */
@@ -313,6 +315,17 @@ function describePaymentRequired(err: ServerError): string {
   return `${head}.${upgrade} Railyard never makes a design read-only for billing; its raw JSON export stays free.`;
 }
 
+/**
+ * The answer for an action Railyard keeps to a signed-in browser. The token is valid, so the message
+ * must not send the user off to mint another one.
+ */
+const SESSION_REQUIRED_ADVICE =
+  "This action needs a signed-in browser: do it in the Railyard web app. An access token can't perform it, " +
+  "and RAILYARD_TOKEN itself is fine, so there is no need to replace it.";
+
+/** Older servers answered a token on a browser-only route with this 401 rather than 403 session_required. */
+const LEGACY_SESSION_REQUIRED = "session sign-in required";
+
 /** Turn an HTTP status + body into a readable, actionable message. */
 function describeError(status: number, text: string): string {
   const parsed = parseServerError(text);
@@ -322,11 +335,13 @@ function describeError(status: number, text: string): string {
     case 400:
       return `Bad request (400)${suffix}`;
     case 401:
-      return `Authentication failed (401)${suffix}. Check RAILYARD_TOKEN is a current "ry_…" personal access token.`;
+      if (detail === LEGACY_SESSION_REQUIRED) return `Browser sign-in required (401). ${SESSION_REQUIRED_ADVICE}`;
+      return `Authentication failed (401)${suffix}. RAILYARD_TOKEN is missing, mistyped, expired or revoked: mint a new "ry_…" personal access token in the Railyard app (User settings → Personal access tokens).`;
     case 402:
       return describePaymentRequired(parsed);
     case 403:
-      return `Forbidden (403)${suffix}. The token's user is not a member of this organisation, or lacks the role this action needs (writes need editor+; member, invite and billing changes need owner).`;
+      if (parsed.code === "session_required") return `Browser sign-in required (403)${suffix}. ${SESSION_REQUIRED_ADVICE}`;
+      return `Forbidden (403)${suffix}. The token's user is not a member of this organisation, or lacks the role this action needs (writes need editor+).`;
     case 404:
       return `Not found (404)${suffix}.`;
     case 409:
@@ -344,7 +359,7 @@ function describeError(status: number, text: string): string {
     case 501:
       return `Not implemented (501)${suffix}.`;
     case 503:
-      return `Unavailable (503)${suffix}. The feature is not configured on this server.`;
+      return `Unavailable (503)${suffix}. The feature is not configured on this server, or the server is briefly unavailable; try again shortly.`;
     default:
       return `Railyard API error (${status})${suffix}`;
   }
@@ -628,32 +643,6 @@ export class RailyardClient {
     });
   }
 
-  /** DELETE /api/projects/{id} — permanently remove the project. */
-  async deleteProject(id: string, orgRef?: string): Promise<void> {
-    const orgId = await this.resolveOrgId(orgRef);
-    await this.request<void>("DELETE", `/api/projects/${encodeURIComponent(id)}`, { orgId });
-  }
-
-  /**
-   * POST /api/projects/{id}/move — move the project from one org into another. `name` optionally
-   * renames it as part of the move, which is how a clash with an existing name in the target org
-   * is resolved in one step.
-   */
-  async moveProject(
-    id: string,
-    toOrgRef: string,
-    fromOrgRef?: string,
-    name?: string,
-  ): Promise<{ id: string; orgId: string; slug: string }> {
-    const fromOrgId = await this.resolveOrgId(fromOrgRef);
-    const toOrgId = await this.requireOrgId(toOrgRef);
-    return this.request<{ id: string; orgId: string; slug: string }>(
-      "POST",
-      `/api/projects/${encodeURIComponent(id)}/move`,
-      { orgId: fromOrgId, body: { orgId: toOrgId, ...(name ? { name } : {}) } },
-    );
-  }
-
   // ---- stateless: server info, validation and export ------------------------
   // These four endpoints need no org and no authentication — they operate on a document the
   // caller supplies, which is why the CLI and the local-first frontend can use them too.
@@ -684,17 +673,6 @@ export class RailyardClient {
   // ---- organisations --------------------------------------------------------
   // Org-management routes name the org in the PATH, not the X-Org-Id header, so every one of
   // these resolves the reference to a concrete id first.
-
-  /** POST /api/orgs — create a shared org; the caller becomes its owner. */
-  createOrg(name: string): Promise<Org> {
-    return this.request<Org>("POST", "/api/orgs", { body: { name } });
-  }
-
-  /** DELETE /api/orgs/{id} — delete a shared org and every project in it (owner-only). */
-  async deleteOrg(orgRef: string): Promise<void> {
-    const orgId = await this.requireOrgId(orgRef);
-    await this.request<void>("DELETE", `/api/orgs/${encodeURIComponent(orgId)}`);
-  }
 
   /** GET /api/orgs/{id}/catalog and the ETag required to replace it (any member). */
   async getOrgCatalogWithRevision(orgRef?: string): Promise<Revisioned<unknown[]>> {
@@ -736,53 +714,15 @@ export class RailyardClient {
     return this.request<Member[]>("GET", `/api/orgs/${encodeURIComponent(orgId)}/members`);
   }
 
-  /** PUT /api/orgs/{id}/members/{userId} — change a member's role (owner-only). */
-  async setMemberRole(userId: string, role: string, orgRef?: string): Promise<void> {
-    const orgId = await this.requireOrgId(orgRef);
-    await this.request<void>("PUT", `/api/orgs/${encodeURIComponent(orgId)}/members/${encodeURIComponent(userId)}`, {
-      body: { role },
-    });
-  }
-
-  /** DELETE /api/orgs/{id}/members/{userId} — remove a member (owner-only). */
-  async removeMember(userId: string, orgRef?: string): Promise<void> {
-    const orgId = await this.requireOrgId(orgRef);
-    await this.request<void>("DELETE", `/api/orgs/${encodeURIComponent(orgId)}/members/${encodeURIComponent(userId)}`);
-  }
-
   /** GET /api/orgs/{id}/invites — pending invitations for an org (owner-only). */
   async invites(orgRef?: string): Promise<Invite[]> {
     const orgId = await this.requireOrgId(orgRef);
     return this.request<Invite[]>("GET", `/api/orgs/${encodeURIComponent(orgId)}/invites`);
   }
 
-  /** POST /api/orgs/{id}/invites — invite an email to join at a role (owner-only). */
-  async createInvite(email: string, role: string | undefined, orgRef?: string): Promise<Invite> {
-    const orgId = await this.requireOrgId(orgRef);
-    return this.request<Invite>("POST", `/api/orgs/${encodeURIComponent(orgId)}/invites`, {
-      body: { email, ...(role ? { role } : {}) },
-    });
-  }
-
-  /** DELETE /api/orgs/{id}/invites/{inviteId} — withdraw a pending invitation (owner-only). */
-  async revokeInvite(inviteId: string, orgRef?: string): Promise<void> {
-    const orgId = await this.requireOrgId(orgRef);
-    await this.request<void>(
-      "DELETE",
-      `/api/orgs/${encodeURIComponent(orgId)}/invites/${encodeURIComponent(inviteId)}`,
-    );
-  }
-
   /** GET /api/invites — the token user's own pending invitations (matched by verified email). */
   myInvites(): Promise<Invite[]> {
     return this.request<Invite[]>("GET", "/api/invites");
-  }
-
-  /** POST /api/invites/{id}/accept — accept an invitation addressed to the token user's email. */
-  async acceptInvite(inviteId: string): Promise<Org> {
-    const org = await this.request<Org>("POST", `/api/invites/${encodeURIComponent(inviteId)}/accept`, { body: {} });
-    this.orgsCache = undefined; // the user is in a new org now — don't resolve against a stale list
-    return org;
   }
 
   // ---- billing --------------------------------------------------------------
@@ -793,15 +733,4 @@ export class RailyardClient {
     return this.request<Billing>("GET", `/api/orgs/${encodeURIComponent(orgId)}/billing`);
   }
 
-  /**
-   * POST /api/orgs/{id}/billing/{checkout|portal} — mint a Stripe hosted-page URL for the owner to
-   * open in a browser. Minting a URL neither charges nor changes the subscription; the owner
-   * completes (or abandons) the change on Stripe's page.
-   */
-  async billingURL(kind: "checkout" | "portal", orgRef?: string): Promise<{ url: string }> {
-    const orgId = await this.requireOrgId(orgRef);
-    return this.request<{ url: string }>("POST", `/api/orgs/${encodeURIComponent(orgId)}/billing/${kind}`, {
-      body: {},
-    });
-  }
 }
