@@ -188,7 +188,7 @@
     "base_url": {
       "type": "string",
       "title": "Railyard base URL",
-      "description": "Base URL of your Railyard backend. Use https://railyard.sh for the hosted service, or your self-hosted URL such as http://localhost:8080.",
+      "description": "Base URL of your Railyard backend. Use https://railyard.sh for the hosted service, or your self-hosted https:// URL. Plain http:// is accepted only for a server on this machine, such as http://localhost:8080.",
       "default": "https://railyard.sh",
       "required": false
     },
