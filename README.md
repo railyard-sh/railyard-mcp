@@ -329,6 +329,10 @@ all-or-nothing, which is why the guidance above matters.
 - **Roles.** Reads need any membership. Project writes need **editor** or **owner** — a
   **viewer** gets a 403. Managing the org itself (rename/delete, members, invitations, billing)
   is **owner**-only.
+- **Organisation access policy.** An organisation's owners can refuse personal access tokens there
+  (403 `org_tokens_disabled`) or admit only accounts on their email domains (403
+  `org_email_domain_required`). The token keeps working in your other organisations; the tool's
+  error says which rule refused it. A read-only token gets 403 `token_read_only` on any write.
 - **Billing.** Designing and the raw JSON export are free on every plan, and a lapsed plan never
   makes a design read-only — it falls back to Community rules. On a server with billing on, a
   **402** refuses a paid feature or growth past a plan limit: `plan_required` (for example a

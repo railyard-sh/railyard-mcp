@@ -263,3 +263,23 @@ test("HTTP failures remain status-aware without exposing credentials", async () 
     }
   });
 });
+
+// An organisation policy refusal is explained by its code, never its wording (railyard-sh/railyard#449, #1314).
+test("a 403 names the organisation policy or read-only token that refused it", async () => {
+  const cases = [
+    ["org_tokens_disabled", /owners do not allow personal access tokens.*other organisations/],
+    ["org_email_domain_required", /only accounts on its own email domains/],
+    ["token_read_only", /read-only token/],
+    [undefined, /not a member of this organisation/],
+  ];
+  let index = 0;
+  await withServer((_request, response) => {
+    const [code] = cases[index++];
+    json(response, 403, { error: "refused", ...(code ? { code } : {}) });
+  }, async (baseUrl) => {
+    const client = newClient(baseUrl);
+    for (const [code, message] of cases) {
+      await assert.rejects(client.health(), (error) => error instanceof RailyardApiError && error.status === 403 && message.test(error.message) && (code ? error.code === code : true));
+    }
+  });
+});

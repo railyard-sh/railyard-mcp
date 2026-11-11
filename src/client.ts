@@ -392,6 +392,24 @@ function describePaymentRequired(err: ServerError): string {
   return `${head}.${upgrade} Railyard never makes a design read-only for billing; its raw JSON export stays free.`;
 }
 
+/**
+ * Explain a 403 by the server's code, never by its wording: an organisation's access policy refuses a
+ * token in that organisation only (railyard-sh/railyard#449, #1314), and a read-only token refuses
+ * every write. Anything else is a membership or role refusal.
+ */
+function describeForbidden(code: string | undefined, suffix: string): string {
+  switch (code) {
+    case "org_tokens_disabled":
+      return `Forbidden (403)${suffix}. This organisation's owners do not allow personal access tokens, so this client cannot reach it; the token still works in your other organisations. Use the Railyard web app for this organisation, or ask an owner.`;
+    case "org_email_domain_required":
+      return `Forbidden (403)${suffix}. This organisation admits only accounts on its own email domains, and the token's account is not on one. Ask an owner.`;
+    case "token_read_only":
+      return `Forbidden (403)${suffix}. RAILYARD_TOKEN is a read-only token; mint a read-and-write token in User settings › API tokens to make changes.`;
+    default:
+      return `Forbidden (403)${suffix}. The token's user is not a member of this organisation, or lacks the role this action needs (writes need editor+; member, invite and billing changes need owner).`;
+  }
+}
+
 /** Turn an HTTP status + body into a readable, actionable message. */
 function describeError(status: number, text: string): string {
   const parsed = parseServerError(text);
@@ -405,7 +423,7 @@ function describeError(status: number, text: string): string {
     case 402:
       return describePaymentRequired(parsed);
     case 403:
-      return `Forbidden (403)${suffix}. The token's user is not a member of this organisation, or lacks the role this action needs (writes need editor+; member, invite and billing changes need owner).`;
+      return describeForbidden(parsed.code, suffix);
     case 404:
       return `Not found (404)${suffix}.`;
     case 409:
