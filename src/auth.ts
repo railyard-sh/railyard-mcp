@@ -30,7 +30,22 @@ type AuthHelperDependencies = {
   write?: (message: string) => void;
 };
 
-/** Parse and normalise a configured Railyard origin without accepting executable URL schemes. */
+/**
+ * True for a host name that can only mean this machine: localhost, 127.0.0.0/8 or ::1. The WHATWG
+ * URL parser has already normalised the host, so "127.1" arrives as "127.0.0.1" and
+ * "[0:0:0:0:0:0:0:1]" as "[::1]".
+ */
+export function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  if (host === "localhost" || host === "[::1]") return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
+/**
+ * Parse and normalise a configured Railyard origin without accepting executable URL schemes.
+ * Every API request carries the access token, so plain http is refused unless the server is on
+ * this machine: anywhere else the token would cross the network unencrypted.
+ */
 export function resolveBaseUrl(value: string | undefined): string {
   const candidate = value?.trim() || DEFAULT_BASE_URL;
   let parsed: URL;
@@ -47,6 +62,12 @@ export function resolveBaseUrl(value: string | undefined): string {
   }
   if (parsed.search || parsed.hash) {
     throw new Error("RAILYARD_BASE_URL must not contain a query string or fragment");
+  }
+  if (parsed.protocol === "http:" && !isLoopbackHost(parsed.hostname)) {
+    throw new Error(
+      "RAILYARD_BASE_URL must use https:// — plain http:// would send the access token unencrypted, " +
+        "so it is only allowed for a server on this machine (localhost, 127.0.0.1 or ::1)",
+    );
   }
 
   const path = parsed.pathname.replace(/\/+$/, "");

@@ -3,14 +3,20 @@
 // One place owns all of the wire concerns:
 //   - authentication  — every request carries `Authorization: Bearer ry_…` (a Railyard
 //     personal access token). The token authenticates as its owning user across all of
-//     that user's organisations. It is NEVER logged.
+//     that user's organisations. It is NEVER logged. Requests never follow a redirect
+//     (`redirect: "error"`), so the token cannot be carried to another address, and the base
+//     URL must be https unless it is this machine (resolveBaseUrl).
 //   - org selection    — org-scoped calls carry the `X-Org-Id` header, which the server
 //     membership-checks (403 if the caller is not a member). The header must be an org
 //     *id*; a slug or name supplied by the caller is resolved to an id via GET /api/orgs.
 //   - error surfacing  — non-2xx responses ({"error": "...", "code"?: "...", …}) become
-//     RailyardApiError with a human-readable, status-aware message the tools relay straight to
-//     the model. The server's machine-readable `code` and any structured fields (a 402's
+//     RailyardApiError with a human-readable, status-aware message the tools relay to the
+//     model. The server's machine-readable `code` and any structured fields (a 402's
 //     requiredPlans, limit, current…) are kept on the error rather than flattened into text.
+//     Upstream text is never relayed verbatim: messages and fields are made printable and
+//     bounded, and a body that is not a Railyard JSON error (a proxy's HTML page) is not shown.
+
+import { resolveBaseUrl } from "./auth.js";
 
 // ---- wire types (mirrors of backend structs) --------------------------------
 
@@ -222,13 +228,85 @@ export class RailyardApiError extends Error {
 
 /** A server error body: {"error": "...", "code"?: "...", ...structured fields}. */
 export interface ServerError {
+  /** The server's message, printable and bounded (see sanitiseText). */
   message: string;
   code?: string;
-  /** Every field other than error and code, as the server sent it. */
+  /** The other fields, kept when they are short primitives or small arrays and objects of them. */
   details?: Record<string, unknown>;
+  /** The body was not a Railyard JSON error (an HTML page from a proxy, plain text…). */
+  unrecognised?: true;
 }
 
-/** Parse a server error body, keeping its code and structured fields; falls back to the raw text. */
+// An error body is upstream text that ends up in front of the model, so it is relayed only in a
+// bounded, printable form: a Railyard JSON error keeps its message, its code and its structured
+// fields, and anything else (a proxy's HTML error page, say) is summarised rather than shown.
+const MAX_ERROR_MESSAGE_CHARS = 300;
+const MAX_DETAIL_STRING_CHARS = 200;
+const MAX_DETAIL_ENTRIES = 20;
+const MAX_DETAILS_CHARS = 2_000;
+const ERROR_CODE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
+const DETAIL_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+/**
+ * Printable, single-line text of at most `max` characters: terminal escape sequences are removed,
+ * other control characters become spaces, invisible formatting characters (zero-width and bidirectional controls) are removed, and runs of
+ * whitespace collapse.
+ */
+export function sanitiseText(value: string, max: number): string {
+  const flat = value
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "") // ANSI terminal escape sequences
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+    .replace(/[­؜᠎​-‏‪-‮⁠-⁤⁦-⁩﻿]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const chars = Array.from(flat);
+  return chars.length <= max ? flat : `${chars.slice(0, max - 1).join("").trimEnd()}…`;
+}
+
+/**
+ * A structured error field in a safe shape, or undefined to drop it: a finite number, a boolean,
+ * null, a bounded string, or (two levels deep at most) a short array or object of those.
+ */
+function safeDetail(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") return sanitiseText(value, MAX_DETAIL_STRING_CHARS);
+  if (typeof value === "boolean" || value === null) return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (depth >= 2 || typeof value !== "object") return undefined;
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, MAX_DETAIL_ENTRIES)
+      .map((item) => safeDetail(item, depth + 1))
+      .filter((item) => item !== undefined);
+  }
+  return safeFields(value as Record<string, unknown>, depth + 1);
+}
+
+function safeFields(fields: Record<string, unknown>, depth: number): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields).slice(0, MAX_DETAIL_ENTRIES)) {
+    if (!DETAIL_KEY_PATTERN.test(key)) continue;
+    const safe = safeDetail(value, depth);
+    if (safe !== undefined) out[key] = safe;
+  }
+  return out;
+}
+
+/** The safe structured fields of an error body, dropping the largest until they fit the budget. */
+function safeDetails(fields: Record<string, unknown>): Record<string, unknown> {
+  const out = safeFields(fields, 0);
+  const size = (value: unknown) => JSON.stringify(value).length;
+  while (Object.keys(out).length && size(out) > MAX_DETAILS_CHARS) {
+    const largest = Object.keys(out).reduce((a, b) => (size(out[b]) > size(out[a]) ? b : a));
+    delete out[largest];
+  }
+  return out;
+}
+
+/**
+ * Parse a server error body, keeping its code and structured fields in a safe, bounded form. A body
+ * that is not a Railyard JSON error yields an empty message and `unrecognised`; its text is never
+ * returned.
+ */
 export function parseServerError(text: string): ServerError {
   if (!text) return { message: "" };
   try {
@@ -236,17 +314,18 @@ export function parseServerError(text: string): ServerError {
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       const { error, code, ...rest } = parsed as Record<string, unknown>;
       if (typeof error === "string" || typeof code === "string") {
+        const details = safeDetails(rest);
         return {
-          message: typeof error === "string" ? error : "",
-          ...(typeof code === "string" && code ? { code } : {}),
-          ...(Object.keys(rest).length ? { details: rest } : {}),
+          message: typeof error === "string" ? sanitiseText(error, MAX_ERROR_MESSAGE_CHARS) : "",
+          ...(typeof code === "string" && ERROR_CODE_PATTERN.test(code) ? { code } : {}),
+          ...(Object.keys(details).length ? { details } : {}),
         };
       }
     }
   } catch {
-    // not JSON — fall through to the raw text
+    // not JSON — summarised below
   }
-  return { message: text.slice(0, 500) };
+  return { message: "", unrecognised: true };
 }
 
 /** Display names for plan ids. The server's catalogue (GET /api/plans) is authoritative. */
@@ -313,6 +392,24 @@ function describePaymentRequired(err: ServerError): string {
   return `${head}.${upgrade} Railyard never makes a design read-only for billing; its raw JSON export stays free.`;
 }
 
+/**
+ * Explain a 403 by the server's code, never by its wording: an organisation's access policy refuses a
+ * token in that organisation only (railyard-sh/railyard#449, #1314), and a read-only token refuses
+ * every write. Anything else is a membership or role refusal.
+ */
+function describeForbidden(code: string | undefined, suffix: string): string {
+  switch (code) {
+    case "org_tokens_disabled":
+      return `Forbidden (403)${suffix}. This organisation's owners do not allow personal access tokens, so this client cannot reach it; the token still works in your other organisations. Use the Railyard web app for this organisation, or ask an owner.`;
+    case "org_email_domain_required":
+      return `Forbidden (403)${suffix}. This organisation admits only accounts on its own email domains, and the token's account is not on one. Ask an owner.`;
+    case "token_read_only":
+      return `Forbidden (403)${suffix}. RAILYARD_TOKEN is a read-only token; mint a read-and-write token in User settings › API tokens to make changes.`;
+    default:
+      return `Forbidden (403)${suffix}. The token's user is not a member of this organisation, or lacks the role this action needs (writes need editor+; member, invite and billing changes need owner).`;
+  }
+}
+
 /** Turn an HTTP status + body into a readable, actionable message. */
 function describeError(status: number, text: string): string {
   const parsed = parseServerError(text);
@@ -326,7 +423,7 @@ function describeError(status: number, text: string): string {
     case 402:
       return describePaymentRequired(parsed);
     case 403:
-      return `Forbidden (403)${suffix}. The token's user is not a member of this organisation, or lacks the role this action needs (writes need editor+; member, invite and billing changes need owner).`;
+      return describeForbidden(parsed.code, suffix);
     case 404:
       return `Not found (404)${suffix}.`;
     case 409:
@@ -370,10 +467,23 @@ interface RequestResult<T> {
   response: Response;
 }
 
-/** A non-2xx response as a RailyardApiError, keeping the server's code and structured fields. */
+/**
+ * A non-2xx response as a RailyardApiError, keeping the server's code and structured fields. The
+ * raw body stays on `bodyText` for this package's own checks (isUnknownRoute) and is never relayed.
+ */
 function apiError(status: number, text: string): RailyardApiError {
   const parsed = parseServerError(text);
-  return new RailyardApiError(status, describeError(status, text), text, parsed.code, parsed.details);
+  const message = parsed.unrecognised
+    ? `${describeError(status, text)} The response was not a Railyard error message (perhaps a proxy or ` +
+      "gateway page), so its content is not shown."
+    : describeError(status, text);
+  return new RailyardApiError(status, message, text, parsed.code, parsed.details);
+}
+
+/** True when fetch failed because the server answered with a redirect (`redirect: "error"`). */
+function isRedirectRefusal(error: unknown): boolean {
+  const cause = (error as { cause?: unknown } | null)?.cause;
+  return cause instanceof Error && /redirect/i.test(cause.message);
 }
 
 /** A file the server sent as the response body (a deliverable download). */
@@ -417,7 +527,8 @@ export class RailyardClient {
   private orgsCache?: Org[];
 
   constructor(opts: RailyardClientOptions) {
-    this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
+    // The same rules as RAILYARD_BASE_URL: https, or plain http only to this machine.
+    this.baseUrl = resolveBaseUrl(opts.baseUrl);
     this.token = opts.token;
     this.defaultOrg = opts.defaultOrg?.trim() || undefined;
   }
@@ -435,7 +546,22 @@ export class RailyardClient {
       headers["Content-Type"] = "application/json";
       payload = JSON.stringify(opts.body);
     }
-    return fetch(`${this.baseUrl}${path}`, { method, headers, body: payload });
+    // Never follow a redirect: it could carry the Authorization header to another address, or from
+    // https down to http. A redirect fails the request instead (see transportError).
+    return fetch(`${this.baseUrl}${path}`, { method, headers, body: payload, redirect: "error" });
+  }
+
+  /** A failed fetch as a RailyardApiError: a refused redirect, or Railyard being unreachable. */
+  private transportError(error: unknown): RailyardApiError {
+    if (isRedirectRefusal(error)) {
+      return new RailyardApiError(
+        0,
+        `Railyard at ${this.baseUrl} answered with a redirect, which this client never follows so the access ` +
+          "token cannot be sent to another address. Set RAILYARD_BASE_URL to the Railyard server's final https:// address.",
+      );
+    }
+    const reason = sanitiseText((error as Error)?.message ?? String(error), MAX_ERROR_MESSAGE_CHARS);
+    return new RailyardApiError(0, `Could not reach Railyard at ${this.baseUrl} — ${reason}`);
   }
 
   private async requestResult<T>(method: string, path: string, opts: RequestOptions = {}): Promise<RequestResult<T>> {
@@ -443,7 +569,7 @@ export class RailyardClient {
     try {
       res = await this.send(method, path, opts);
     } catch (e) {
-      throw new RailyardApiError(0, `Could not reach Railyard at ${this.baseUrl} — ${(e as Error).message}`);
+      throw this.transportError(e);
     }
     const text = await res.text();
     if (!res.ok) throw apiError(res.status, text);
@@ -451,7 +577,13 @@ export class RailyardClient {
     try {
       return { value: JSON.parse(text) as T, response: res };
     } catch {
-      return { value: text as unknown as T, response: res };
+      // Every Railyard API answer is JSON, so this is something in between (a captive portal or a
+      // proxy's page). Its text is not passed on.
+      throw new RailyardApiError(
+        502,
+        `Railyard answered ${method} ${path} (${res.status}) with a response that is not JSON, so its content is ` +
+          "not shown. Check RAILYARD_BASE_URL points at the Railyard server itself.",
+      );
     }
   }
 
@@ -465,7 +597,7 @@ export class RailyardClient {
     try {
       res = await this.send(method, path, opts);
     } catch (e) {
-      throw new RailyardApiError(0, `Could not reach Railyard at ${this.baseUrl} — ${(e as Error).message}`);
+      throw this.transportError(e);
     }
     if (!res.ok) throw apiError(res.status, await res.text());
     return {

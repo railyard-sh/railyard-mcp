@@ -79,6 +79,16 @@ request/response, so it has no tool; see the caveat on concurrent edits below.
 and if that too is unset, to your first (personal) organisation. Slugs/names are resolved to
 the org id the API needs (via `GET /api/orgs`) automatically.
 
+**Tool safety hints.** Every tool declares the MCP `readOnlyHint`, `destructiveHint`,
+`idempotentHint` and `openWorldHint` annotations. Reads are read-only. A write that removes,
+replaces or overwrites stored data is destructive — including `rename_project`, which changes the
+project's URL slug so links to the old one stop working; a purely additive write is not. A
+protocol test pins each tool's hints, so a new tool cannot ship without a decision.
+
+**Returned text is data.** Names, descriptions, labels, comments and error messages come from
+people's Railyard workspaces. The server tells the client at start-up (MCP `instructions`) that
+such text is user data, never instructions to follow.
+
 ---
 
 ## Setup
@@ -95,11 +105,11 @@ the org id the API needs (via `GET /api/orgs`) automatically.
 Quick path:
 
 ```bash
-npx -y railyard-mcp auth
+npx -y railyard-mcp@0.2.1 auth
 ```
 
 That opens Railyard in your browser. Sign in, open User settings if needed, create a token,
-and copy the `ry_…` secret. In headless environments, run `npx -y railyard-mcp auth --no-open`
+and copy the `ry_…` secret. In headless environments, run `npx -y railyard-mcp@0.2.1 auth --no-open`
 and copy the printed URL.
 
 Manual path:
@@ -114,7 +124,7 @@ Treat this secret like a password (see [Auth model](#auth-model-why-a-pat) below
 ### 3. Install and build
 
 Only needed to **run from source** (or to develop). If you install the published package
-with `npx -y railyard-mcp`, skip this; npm fetches the packaged `dist/` files for you.
+with `npx -y railyard-mcp@0.2.1`, skip this; npm fetches the packaged `dist/` files for you.
 
 ```bash
 cd railyard-mcp
@@ -129,7 +139,7 @@ This compiles `src/` to `dist/`. The entry point is `dist/index.js`.
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `RAILYARD_TOKEN` | **yes** | Your `ry_…` personal access token. |
-| `RAILYARD_BASE_URL` | no | Railyard base URL. Defaults to `https://railyard.sh`; override it only for self-hosted or local Railyard. |
+| `RAILYARD_BASE_URL` | no | Railyard base URL. Defaults to `https://railyard.sh`; override it only for self-hosted or local Railyard. Must be `https://`; plain `http://` is accepted only for this machine (`localhost`, `127.0.0.0/8`, `::1`). |
 | `RAILYARD_ORG` | no | Default org (id or slug) for org-scoped tools. |
 
 You can smoke-test it from a shell:
@@ -148,23 +158,28 @@ see the standalone [INSTALL.md](./INSTALL.md); the essentials are below.
 
 **Two ways to run it:**
 
-- **Published (recommended):** `npx -y railyard-mcp` downloads and runs the package on
-  demand — no clone, no build. Requires the package to be on npm (see
-  [For operators](#for-operators-publishing) if it isn't yet).
+- **Published (recommended):** `npx -y railyard-mcp@0.2.1` downloads and runs that exact
+  version on demand — no clone, no build. Keep the `@<version>` pin and change it deliberately
+  when you upgrade (`npm view railyard-mcp version` shows the latest); see
+  [Verifying a release](#verifying-a-release).
 - **From source (works today):** run the built entry point directly with
   `node /absolute/path/to/railyard-mcp/dist/index.js` after `npm install && npm run build`
   in this repo (see [Setup](#setup)). Substitute that `command`/`args` in any snippet below.
 
 The published package uses the **hosted** URL `https://railyard.sh` automatically. For a
 self-hosted or local backend, add `RAILYARD_BASE_URL` with your own URL (for example,
-`http://localhost:8080`). `RAILYARD_ORG` is optional — add it to pin a default organisation.
+`https://railyard.internal.example` or `http://localhost:8080`). The token goes with every
+request, so plain `http://` is refused unless the server is on this machine, and the client never
+follows a redirect. `RAILYARD_ORG` is optional — add it to pin a default organisation.
 
 ### Claude Desktop — one-click bundle (`.mcpb`)
 
 The easiest path, no JSON. Open **Claude Desktop → Settings → Extensions**, then drag in
-(or **Install extension**) the packaged `railyard-mcp.mcpb` bundle and fill in the token.
+(or **Install extension**) the packaged `railyard-mcp-<version>.mcpb` bundle and fill in the token.
 Leave the optional base URL at its hosted default unless you self-host. The bundle is built
-from [`manifest.json`](./manifest.json) — see [For operators](#for-operators-publishing).
+from [`manifest.json`](./manifest.json) and attached to each
+[GitHub release](https://github.com/railyard-sh/railyard-mcp/releases) with checksums and a
+signed build attestation — see [Verifying a release](#verifying-a-release).
 
 ### Claude Desktop — manual config
 
@@ -178,7 +193,7 @@ Add the server under `mcpServers` in `claude_desktop_config.json`:
   "mcpServers": {
     "railyard": {
       "command": "npx",
-      "args": ["-y", "railyard-mcp"],
+      "args": ["-y", "railyard-mcp@0.2.1"],
       "env": {
         "RAILYARD_TOKEN": "ry_your_token_here",
         "RAILYARD_ORG": "my-team-slug"
@@ -200,12 +215,12 @@ Register it in one command:
 ```bash
 claude mcp add railyard \
   --env RAILYARD_TOKEN=ry_your_token_here \
-  -- npx -y railyard-mcp
+  -- npx -y railyard-mcp@0.2.1
 ```
 
 Check it with `claude mcp list`. Add `--scope project` to write a shared `.mcp.json`
 instead of your user config (keep real tokens out of committed files). From source, swap
-the trailing `-- npx -y railyard-mcp` for `-- node /absolute/path/to/railyard-mcp/dist/index.js`.
+the trailing `-- npx -y railyard-mcp@0.2.1` for `-- node /absolute/path/to/railyard-mcp/dist/index.js`.
 
 A project-level `.mcp.json` takes the same shape as the Claude Desktop block above.
 
@@ -222,15 +237,15 @@ Register it in one command:
 ```bash
 codex mcp add railyard \
   --env RAILYARD_TOKEN=ry_your_token_here \
-  -- npx -y railyard-mcp
+  -- npx -y railyard-mcp@0.2.1
 ```
 
 Check it with `codex mcp list`. Run `codex mcp --help` to see the rest of the Codex MCP
-commands. From source, swap the trailing `-- npx -y railyard-mcp` for
+commands. From source, swap the trailing `-- npx -y railyard-mcp@0.2.1` for
 `-- node /absolute/path/to/railyard-mcp/dist/index.js`.
 
 `codex mcp login railyard` is only for MCP servers that advertise OAuth. Railyard currently
-uses a PAT, so use `npx -y railyard-mcp auth` to open Railyard in your browser, then paste
+uses a PAT, so use `npx -y railyard-mcp@0.2.1 auth` to open Railyard in your browser, then paste
 the resulting token into the `RAILYARD_TOKEN` env var above.
 
 ### Cursor
@@ -243,7 +258,7 @@ Edit `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project), then enable
   "mcpServers": {
     "railyard": {
       "command": "npx",
-      "args": ["-y", "railyard-mcp"],
+      "args": ["-y", "railyard-mcp@0.2.1"],
       "env": {
         "RAILYARD_TOKEN": "ry_your_token_here"
       }
@@ -258,7 +273,7 @@ Launch this command with the environment set; the client speaks MCP to it over s
 
 ```
 command: npx
-args:    ["-y", "railyard-mcp"]
+args:    ["-y", "railyard-mcp@0.2.1"]
 env:     RAILYARD_TOKEN=ry_your_token_here
          RAILYARD_ORG=my-team-slug        # optional
 ```
@@ -314,6 +329,10 @@ all-or-nothing, which is why the guidance above matters.
 - **Roles.** Reads need any membership. Project writes need **editor** or **owner** — a
   **viewer** gets a 403. Managing the org itself (rename/delete, members, invitations, billing)
   is **owner**-only.
+- **Organisation access policy.** An organisation's owners can refuse personal access tokens there
+  (403 `org_tokens_disabled`) or admit only accounts on their email domains (403
+  `org_email_domain_required`). The token keeps working in your other organisations; the tool's
+  error says which rule refused it. A read-only token gets 403 `token_read_only` on any write.
 - **Billing.** Designing and the raw JSON export are free on every plan, and a lapsed plan never
   makes a design read-only — it falls back to Community rules. On a server with billing on, a
   **402** refuses a paid feature or growth past a plan limit: `plan_required` (for example a
@@ -324,6 +343,12 @@ all-or-nothing, which is why the guidance above matters.
 - **Errors are readable.** HTTP failures are surfaced as `isError` tool results with a plain
   message, e.g. *"Forbidden (403): not a member of this organisation"*, *"Conflict (409): a
   project with that name already exists"*, *"Authentication failed (401): …"*.
+- **Upstream text is bounded.** The server's message and structured fields are relayed with
+  control and invisible formatting characters removed and their length capped. A response that is
+  not a Railyard JSON error — a proxy's or captive portal's HTML page, say — is summarised by its
+  status and never shown.
+- **Redirects are errors.** Requests never follow a redirect, so the token cannot be carried to
+  another address; point `RAILYARD_BASE_URL` at the server's final `https://` address.
 
 ---
 
@@ -364,31 +389,46 @@ all-or-nothing, which is why the guidance above matters.
 
 ## For operators (publishing)
 
-Two distribution channels, both from this `mcp/` directory. Neither is done automatically —
-these are the manual operator steps.
+Releases are built and published by GitHub Actions, never from a laptop. Publishing remains an
+explicit operator action: bump the version in `package.json`, `manifest.json`, the server's
+`version` in `src/index.ts` and the pinned `railyard-mcp@<version>` in this README and
+INSTALL.md (a test keeps them aligned), merge, then publish a GitHub release tagged
+`v<version>`. [`.github/workflows/release.yml`](./.github/workflows/release.yml) then:
 
-**npm** (enables `npx -y railyard-mcp` and the config blocks above):
+1. re-runs the tests, coverage, type-check and audit on the tagged source, and checks the tag
+   matches `package.json` and `manifest.json`;
+2. **npm** — publishes with `npm publish --provenance --access public` through
+   [npm trusted publishing](https://docs.npmjs.com/trusted-publishers) (GitHub OIDC, so no npm
+   token is stored anywhere), from the `npm` environment;
+3. **Claude Desktop bundle** — packs `railyard-mcp-<version>.mcpb` from
+   [`manifest.json`](./manifest.json) with runtime dependencies only, writes `SHA256SUMS`, signs a
+   build-provenance attestation for it, and attaches both files to the release.
 
-```bash
-npm publish            # runs the build first via prepublishOnly; add --access public if you scope the name
-```
+One-time setup on npmjs.com: under the `railyard-mcp` package's **Settings → Trusted
+publishing**, add GitHub Actions with repository `railyard-sh/railyard-mcp`, workflow
+`release.yml` and environment `npm`; then set the package to require two-factor authentication
+and disallow tokens. Add required reviewers to the `npm` environment in the repository settings
+to gate each publish.
 
 `package.json` ships only `dist/`, `manifest.json`, `README.md`, `INSTALL.md` and `LICENSE` (see its
 `files`), and the `prepare`/`prepublishOnly` scripts rebuild `dist/` so it is always fresh
-on publish. The public package name is the unscoped `railyard-mcp`. Publishing remains an
-explicit operator action; verify the version, changelog and package contents first.
+on publish. The public package name is the unscoped `railyard-mcp`.
 
-**Claude Desktop bundle** (`.mcpb`, the one-click install):
+### Verifying a release
 
 ```bash
-npm run build                       # produce dist/
-npx @anthropic-ai/mcpb pack         # bundles manifest.json + dist/ + deps into railyard-mcp.mcpb
+# npm: registry signatures and the provenance attestation of the installed version
+mkdir railyard-mcp-check && cd railyard-mcp-check
+npm init -y >/dev/null && npm install --ignore-scripts railyard-mcp@0.2.1
+npm audit signatures
+
+# .mcpb: the checksum and the signed build attestation, from the release's assets
+sha256sum -c SHA256SUMS            # macOS: shasum -a 256 -c SHA256SUMS
+gh attestation verify railyard-mcp-0.2.1.mcpb --repo railyard-sh/railyard-mcp
 ```
 
-The bundle is described by [`manifest.json`](./manifest.json): it declares the Node entry
-point and a `user_config` that prompts for the token (stored securely) and an optional base
-URL that defaults to the hosted service. Distribute the resulting `.mcpb` file for
-drag-and-drop install.
+Versions published before the release workflow (0.2.1 and earlier) carry npm's registry
+signature but no provenance attestation, and their bundles have no attestation.
 
 ## Development
 
